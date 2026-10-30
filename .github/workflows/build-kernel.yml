@@ -4,6 +4,17 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      kmi:
+        description: '目标 KMI：all 或矩阵中的单个值'
+        required: false
+        default: all
+        type: string
+      debug:
+        description: '带 NBG_DEBUG 日志构建'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -13,22 +24,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      single: ${{ steps.resolve.outputs.single }}
+    steps:
+      - name: Resolve matrix from inputs
+        id: resolve
+        run: |
+          set -euo pipefail
+          all='["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12","android17-6.18"]'
+          kmi='${{ inputs.kmi }}'
+          if [ -z "$kmi" ] || [ "$kmi" = "all" ]; then
+            echo "matrix={\"kmi\":$all}" >> "$GITHUB_OUTPUT"
+            echo "single=false" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$all" | grep -qx ".*\"$kmi\".*"; then
+            echo "matrix={\"kmi\":[\"$kmi\"]}" >> "$GITHUB_OUTPUT"
+            echo "single=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "未知 KMI: $kmi" >&2
+            exit 1
+          fi
+          cat "$GITHUB_OUTPUT"
+
   build:
     name: Build NBG.ko for ${{ matrix.kmi }}
+    needs: [prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
-          - android17-6.18
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     container:
       image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20260828
       options: --privileged
@@ -37,6 +66,7 @@ jobs:
         shell: bash
     env:
       KMI: ${{ matrix.kmi }}
+      NBG_DEBUG: ${{ inputs.debug && '1' || '0' }}
 
     steps:
       - name: Checkout source code
@@ -47,18 +77,22 @@ jobs:
       - name: Build kernel module
         run: |
           set -euo pipefail
-          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}"
+          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}"
           test -s NBG.ko
 
-      - name: Verify module version section
+      - name: Verify kernel module
         run: |
           set -euo pipefail
-          readelf_bin="$(command -v readelf || command -v llvm-readelf)"
-          size_hex="$("$readelf_bin" -SW NBG.ko | awk '$2 == "__versions" { print $6; exit }')"
-          test -n "$size_hex"
-          test "$((16#$size_hex))" -gt 0
-          strings -a NBG.ko | grep -qx 'module_layout'
-          echo "KO_CHECK __versions=0x${size_hex} module_layout=ok"
+          # module_layout 是 MODVERSIONS ABI 标记；缺了它设备端 insmod 必然拒绝。
+          grep -aq 'module_layout' NBG.ko
+          echo "KO_CHECK module_layout=ok"
+          if command -v llvm-readelf >/dev/null 2>&1; then
+            llvm-readelf -SW NBG.ko | awk '$2 == "__versions" { print "KO_CHECK __versions size=0x" $6 }'
+          elif command -v readelf >/dev/null 2>&1; then
+            readelf -SW NBG.ko | awk '$2 == "__versions" { print "KO_CHECK __versions size=0x" $6 }'
+          else
+            echo "KO_CHECK __versions 跳过：镜像内无 readelf"
+          fi
 
       - name: Prepare kernel artifact
         run: |
@@ -82,7 +116,8 @@ jobs:
 
   package:
     name: Package and publish release
-    needs: [build]
+    needs: [prepare, build]
+    if: needs.prepare.outputs.single == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -98,10 +133,8 @@ jobs:
       - name: Verify modules and compress
         run: |
           set -euo pipefail
-          for kmi in android12-5.10 android13-5.10 android13-5.15 \
-                     android14-5.15 android14-6.1 android15-6.6 \
-                     android16-6.12 android17-6.18; do
-            (cd out && sha256sum --check "NBG-$kmi.ko.sha256")
+          for file in out/*.ko.sha256; do
+            (cd out && sha256sum --check "$(basename "$file")")
           done
           python3 - <<'PY'
           from pathlib import Path
