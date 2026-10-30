@@ -1206,30 +1206,10 @@ static long nbg_comm_ioctl_dispatch(struct nbg_client_ctx *ctx,
                               req.size, &nbytes);
         return ret;
     }
-    case OP_WRITE_MEM: {
-        COPY_MEMORY req;
-        size_t nbytes = 0;
-
-        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-            return -EFAULT;
-        ret = nbg_write_memory(req.pid, req.addr, (uintptr_t)req.buffer,
-                               req.size, &nbytes);
-        return ret;
-    }
-    case OP_FLUSH_ICACHE: {
-        FLUSH_ICACHE_REQ req;
-
-        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-            return -EFAULT;
-        return nbg_flush_icache(req.pid, req.addr, req.size);
-    }
-    case OP_READV_MEM: {
-        READV_MEMORY req;
-
-        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-            return -EFAULT;
-        return nbg_readv_memory(req.pid, (READV_ENTRY __user *)req.iovs, req.count);
-    }
+    case OP_WRITE_MEM:
+    case OP_FLUSH_ICACHE:
+    case OP_READV_MEM:
+        return -ENOTTY;
     case OP_MODULE_BASE: {
         MODULE_BASE req;
         char name[NBG_NAME_LEN];
