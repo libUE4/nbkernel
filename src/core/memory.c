@@ -357,7 +357,7 @@ static int nbg_pte_get_present_page_locked(struct mm_struct *mm,
     if (pud_leaf(pudval)) {
         ptl = pud_lock(mm, pud);
         pudval = READ_ONCE(*pud);
-        if (!pud_leaf(pudval) || !pud_present(pudval) || pud_devmap(pudval)) {
+        if (!pud_leaf(pudval) || !pud_present(pudval) || compat_pud_devmap(pudval)) {
             spin_unlock(ptl);
             return -EAGAIN;
         }
@@ -386,7 +386,7 @@ static int nbg_pte_get_present_page_locked(struct mm_struct *mm,
     if (pmd_leaf(pmdval)) {
         ptl = pmd_lock(mm, pmd);
         pmdval = READ_ONCE(*pmd);
-        if (!pmd_leaf(pmdval) || !pmd_present(pmdval) || pmd_devmap(pmdval)) {
+        if (!pmd_leaf(pmdval) || !pmd_present(pmdval) || compat_pmd_devmap(pmdval)) {
             spin_unlock(ptl);
             return -EAGAIN;
         }
@@ -413,7 +413,7 @@ static int nbg_pte_get_present_page_locked(struct mm_struct *mm,
         return -EAGAIN;
 
     pteval = READ_ONCE(*ptep);
-    if (!pte_present(pteval) || pte_devmap(pteval)) {
+    if (!pte_present(pteval) || compat_pte_devmap(pteval)) {
         pte_unmap_unlock(ptep, ptl);
         return -EFAULT;
     }

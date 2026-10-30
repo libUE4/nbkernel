@@ -26,6 +26,7 @@
 #include "memory.h"
 #include "nbg_log.h"
 #include "nbg_ksyms.h"
+#include "nbg_compat.h"
 
 #define NBG_LOAD_FAULTINFO_HOOKS 1
 #define NBG_LOAD_DEVPTS_FILTER 1
@@ -240,4 +241,4 @@ module_init(nbg_init);
 module_exit(nbg_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("QTI raw network helper");
-MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+NBG_MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);

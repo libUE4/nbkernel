@@ -135,4 +135,35 @@
       for (t = p; (t = next_thread(t)) != p; )
 #endif
 
+/* ===== task_call_func:task_call_f 在 6.1 前未定义 =====
+ * 6.1+ 在 linux/wait.h 里导出 typedef，更早的内核只有内部调用者。
+ * 这里的类型与 6.1 的定义逐字一致，ro_task_call 通过 kallsyms 调用。 */
+#ifndef NBG_HAVE_TASK_CALL_F
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+typedef int (*task_call_f)(struct task_struct *p, void *arg);
+#endif
+#endif
+
+/* ===== *_devmap:6.18 删除 =====
+ * 6.18 移除了 pud/pmd/pte_devmap()，device-private 页由 is_device_private_page()
+ * 判定。调用点语义不变：返回非零表示不得走普通页表读写路径。 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+  #define compat_pud_devmap(pudval) 0
+  #define compat_pmd_devmap(pmdval) 0
+  #define compat_pte_devmap(pteval) 0
+#else
+  #define compat_pud_devmap(pudval) pud_devmap(pudval)
+  #define compat_pmd_devmap(pmdval) pmd_devmap(pmdval)
+  #define compat_pte_devmap(pteval) pte_devmap(pteval)
+#endif
+
+/* ===== MODULE_IMPORT_NS:6.18 起只收字符串字面量 =====
+ * 6.17 及以前是 MODULE_IMPORT_NS(ns)，宏内部自己 __stringify；
+ * 6.18 改成 MODULE_IMPORT_NS("ns")，裸标识符会报 expected ';'。 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+  #define NBG_MODULE_IMPORT_NS(ns) MODULE_IMPORT_NS(#ns)
+#else
+  #define NBG_MODULE_IMPORT_NS(ns) MODULE_IMPORT_NS(ns)
+#endif
+
 #endif /* _NBG_COMPAT_H_ */
