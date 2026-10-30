@@ -1,0 +1,15 @@
+# 内核镜像与 qemu 测试产物
+qemu_tests/
+
+# 内核模块构建中间产物
+*.o
+*.mod
+*.mod.c
+*.cmd
+*.symvers
+*.order
+.module-common.o*
+
+# 编辑器与系统
+.DS_Store
+*.swp
