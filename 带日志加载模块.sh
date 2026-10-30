@@ -2,7 +2,7 @@
 # Transaction copy: preserve existing kernel logs and the actual insmod status.
 set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-MODULE_PATH="$HERE/NBG.ko"
+MODULE_PATH="$HERE/output_ddk/6.6.ko"
 [ -f "$MODULE_PATH" ] || { echo "Error: Module file not found: $MODULE_PATH"; exit 1; }
 sha256sum "$MODULE_PATH"
 insmod "$MODULE_PATH"

@@ -196,7 +196,11 @@ curl -sSL -o "$ZIP_PATH" \
     -H "Authorization: Bearer ${TOKEN}" \
     "https://api.github.com/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip"
 
-python3 - "$ZIP_PATH" "$SCRIPT_DIR/output_ddk" <<'PY'
+# 只保留 output_ddk/<短版本>.ko，CI 的中间命名文件解压到临时目录。
+STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_DIR"' EXIT
+
+python3 - "$ZIP_PATH" "$STAGE_DIR" <<'PY'
 import sys
 import zipfile
 
@@ -204,12 +208,14 @@ archive, out_dir = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(archive) as zf:
     for info in zf.infolist():
         zf.extract(info, out_dir)
-        print("extract", info.filename)
 PY
 rm -f "$ZIP_PATH"
 
+(cd "$STAGE_DIR" && sha256sum --check "NBG-${TARGET}.ko.sha256") \
+    || die "产物 sha256 校验失败"
+
 KO_PATH="$SCRIPT_DIR/output_ddk/${SHORT_VER}.ko"
-cp "$SCRIPT_DIR/output_ddk/NBG-${TARGET}.ko" "$KO_PATH"
+cp "$STAGE_DIR/NBG-${TARGET}.ko" "$KO_PATH"
 
 # ---------- 校验 ----------
 # 缺 module_layout 的版本记录只触发内核一条 no symbol version 警告，不影响加载。
