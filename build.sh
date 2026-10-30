@@ -145,9 +145,12 @@ done
 echo "[run] ${RUN_ID}"
 
 # ---------- 等结果 ----------
+# run 刚创建时 jobs 还是空的，必须等第一个 job 出现再判结论。
 JOB_PATTERN="Build NBG.ko for ${TARGET}"
-while :; do
-    read -r JOB_STATE ARTIFACT_ID < <(api GET "/repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=40" |
+JOB_STATE=""
+DEADLINE=$((SECONDS + 2400))
+while [ $SECONDS -lt $DEADLINE ]; do
+    read -r JOB_STATE JOB_RESULT < <(api GET "/repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=40" |
         python3 -c "
 import json, sys
 want = sys.argv[1]
@@ -156,21 +159,22 @@ for job in json.load(sys.stdin).get('jobs', []):
         print(job['status'], job.get('conclusion') or '-')
         break
 else:
-    print('missing -')
+    print('pending -')
 " "$JOB_PATTERN")
 
     case "$JOB_STATE" in
         completed)
-            if [ "$ARTIFACT_ID" != "success" ]; then
-                die "远程编译失败: ${JOB_PATTERN} -> ${ARTIFACT_ID}
+            if [ "$JOB_RESULT" != "success" ]; then
+                die "远程编译失败: ${JOB_PATTERN} -> ${JOB_RESULT}
 查看日志: https://github.com/${REPO}/actions/runs/${RUN_ID}"
             fi
             break ;;
-        missing) die "run 里没有找到 job: ${JOB_PATTERN}" ;;
     esac
     printf '.'
     sleep 10
 done
+[ "$JOB_STATE" = "completed" ] || die "等待超时: ${JOB_PATTERN}
+查看记录: https://github.com/${REPO}/actions/runs/${RUN_ID}"
 echo
 
 # ---------- 下载产物 ----------
