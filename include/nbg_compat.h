@@ -166,4 +166,11 @@ typedef int (*task_call_f)(struct task_struct *p, void *arg);
   #define NBG_MODULE_IMPORT_NS(ns) MODULE_IMPORT_NS(ns)
 #endif
 
+/* ===== DBG_MDSCR_MDE:6.18 从 asm/debug-monitors.h 移除 =====
+ * MDSCR_EL1.MDE 是 ARM 架构固定位（bit 15，monitor debug enable），
+ * 与内核版本无关，6.18 之前由 asm/debug-monitors.h 提供。 */
+#ifndef DBG_MDSCR_MDE
+#define DBG_MDSCR_MDE (1 << 15)
+#endif
+
 #endif /* _NBG_COMPAT_H_ */
