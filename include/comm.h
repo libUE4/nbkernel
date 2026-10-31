@@ -98,6 +98,8 @@ enum OPERATIONS {
     OP_QUERY_SIGNAL     = 0x95B,
     /* 以目标线程的 APGA 密钥执行一次 PACGA。 */
     OP_EXECUTE_PACGA    = 0x95C,
+    /* 打开 system_server 受限写会话。 */
+    OP_SENSOR_OPEN      = 0x95D,
 };
 
 typedef struct _INIT_KEY {
@@ -284,6 +286,40 @@ typedef struct _NBG_PACGA_REQ {
     uint64_t modifier;
     uint64_t out_result;
 } NBG_PACGA_REQ, *PNBG_PACGA_REQ;
+
+/* ==================== 受限写会话 ABI ==================== */
+
+#define NBG_SENSOR_OPEN_ABI_VERSION 1U
+#define NBG_SENSOR_ARM_ABI_VERSION  1U
+
+/* 受限会话：只能访问 system_server 的 libsensorservice.so 映射。
+ * version 必须匹配；out_fd 是 CLOEXEC 的定位 IO fd。 */
+typedef struct _NBG_SENSOR_OPEN_REQ {
+    uint32_t version;
+    uint32_t reserved;
+    int32_t pid;
+    int32_t out_fd;
+    uint32_t out_uid;
+    uint64_t out_module_base;
+    uint64_t out_module_size;
+} NBG_SENSOR_OPEN_REQ, *PNBG_SENSOR_OPEN_REQ;
+
+/* 布防前先把 trampoline 写进 delta 空穴；replacement 必须是 delta+16。
+ * 布防后只允许写 delta 与 got_addr 各 8 字节。 */
+typedef struct _NBG_SENSOR_ARM_REQ {
+    uint32_t version;
+    uint32_t reserved;
+    uint64_t got_addr;
+    uint64_t original;
+    uint64_t replacement;
+    uint64_t delta_addr;
+} NBG_SENSOR_ARM_REQ, *PNBG_SENSOR_ARM_REQ;
+
+/* 会话 fd 上的私有 ioctl。 */
+#define NBG_SENSOR_IOC_ARM \
+    _IOW('S', 1, NBG_SENSOR_ARM_REQ)
+#define NBG_SENSOR_IOC_QUERY_ACCESS \
+    _IOWR('S', 2, NBG_QUERY_ACCESS_REQ)
 
 typedef struct _TOUCH_POINT {
     int x;
