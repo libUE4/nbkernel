@@ -1211,6 +1211,58 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         return -ENOTTY;
 
     /* 进程 / 线程 / 地址查询 */
+    case OP_MODULE_BASE: {
+        /* 旧命令名，转新实现，保持旧客户端可用。 */
+        MODULE_BASE req;
+        NBG_MODULE_BASE_REQ q;
+        long copied;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        if (!req.name)
+            return -EINVAL;
+        copied = strncpy_from_user((char *)q.name, (char __user *)req.name,
+                                   sizeof(q.name));
+        if (copied < 0)
+            return -EFAULT;
+        q.name[sizeof(q.name) - 1] = '\0';
+        q.pid = req.pid;
+        q.reserved = 0;
+        q.out_base = 0;
+        q.out_size = 0;
+        ret = nbg_query_module_base(&q);
+        if (ret)
+            return ret;
+        req.base = (uintptr_t)q.out_base;
+        if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+            return -EFAULT;
+        return req.base ? 0 : -ENOENT;
+    }
+    case OP_FIND_PID: {
+        /* 旧命令名，转新实现，保持旧客户端可用。 */
+        FIND_PID_REQ req;
+        NBG_GET_PID_REQ q;
+        long copied;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        if (!req.name)
+            return -EINVAL;
+        copied = strncpy_from_user((char *)q.name, (char __user *)req.name,
+                                   sizeof(q.name));
+        if (copied < 0)
+            return -EFAULT;
+        q.name[sizeof(q.name) - 1] = '\0';
+        q.out_pid = -1;
+        q.reserved = 0;
+        ret = nbg_query_pid(&q);
+        if (ret)
+            return ret;
+        req.pid = q.out_pid;
+        if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+            return -EFAULT;
+        return req.pid > 0 ? 0 : -ESRCH;
+    }
     case OP_GET_PID:
         return nbg_query_pid((void __user *)arg);
     case OP_GET_PIDS:
