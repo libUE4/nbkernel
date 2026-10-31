@@ -457,8 +457,10 @@ static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
 
         this_len = min(this_len, count);
         virt = nbg_phys_to_virt_nc(phys);
-        if (!virt)
+        if (!virt) {
+            pr_err("nbg: no nc mapping phys=0x%lx addr=0x%lx\n", phys, addr);
             break;
+        }
 
         if (!write) {
             failed_len = copy_to_user(buf, (void *)virt, this_len);
@@ -722,6 +724,11 @@ static int nbg_rw_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
     else
         ret = nbg_nc_memrw(mm, (unsigned long)remote_addr,
                            (char __user *)user_addr, size, write);
+
+    if (ret < 0)
+        pr_err("nbg: rw pid=%d addr=0x%lx size=%zu w=%d ret=%zd linearmap=%d/%lu\n",
+               pid, (unsigned long)remote_addr, size, write, ret,
+               g_linearmap_ready ? 1 : 0, g_linearmap_count);
 
     mmput(mm);
     if (task)
