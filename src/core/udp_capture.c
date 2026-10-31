@@ -35,6 +35,27 @@
 
 #define UDP_CAP_RING 256U
 
+/* 与用户态 NBG_UDP_PACKET 布局一致，ABI 边界上必须逐字节相同。 */
+struct nbg_udp_packet {
+    u64 ts_ns;
+    u64 seq;
+    u32 src_ip;
+    u32 dst_ip;
+    u16 src_port;
+    u16 dst_port;
+    u16 payload_len;
+    u16 flags;
+    u32 sock_uid;
+    u32 reserved;
+    u8 payload[NBG_UDP_CAP_MAX_PAYLOAD];
+};
+
+static_assert(sizeof(struct nbg_udp_packet) == sizeof(NBG_UDP_PACKET),
+              "udp packet ABI layout changed");
+static_assert(offsetof(struct nbg_udp_packet, payload) ==
+              offsetof(NBG_UDP_PACKET, payload),
+              "udp packet payload offset changed");
+
 static DEFINE_MUTEX(g_udp_init_lock);
 static DEFINE_MUTEX(g_udp_read_lock);
 static DEFINE_SPINLOCK(g_udp_lock);
