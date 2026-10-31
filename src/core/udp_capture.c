@@ -172,8 +172,15 @@ static int nbg_udp_rcv_pre(struct kprobe *p, struct pt_regs *regs)
 
     sk = (struct sock *)regs->regs[0];
     skb = (struct sk_buff *)regs->regs[1];
-    if (!nbg_udp_sock_uid_ok(sk))
+    if (!nbg_udp_sock_uid_ok(sk)) {
+        /* 前几次打印实际 UID，定位过滤条件。 */
+        if (atomic64_read(&g_udp_hits) <= 4 && sk)
+            pr_info("nbg: udp uid mismatch want=%u got=%u\n",
+                    (unsigned int)g_udp_uid,
+                    (unsigned int)from_kuid_munged(&init_user_ns,
+                                                   sk->sk_uid));
         return 0;
+    }
 
     /* kprobe handler 不会迁移且递归探针被抑制，所以本 CPU 的暂存包
      * 在发布前是私有的。配置变更会先注销并排空探针再更新。 */
