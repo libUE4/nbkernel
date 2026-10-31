@@ -66,13 +66,20 @@ EXTRA_CFLAGS += -mtune=cortex-a53
 # 禁用 MODVERSIONS 警告升级为错误
 KBUILD_MODPOST_WARN := 1
 
-# ---------- 默认 KDIR(可被外部覆盖)----------
-KDIR ?= /home/user3059213112/driver/android_kernel/6.6/out/cache/last_build/common
+# ---------- 构建入口 ----------
+# 内核树由 CI 提供：make KDIR=<kernel src>。
+# 本地直接 make 会被拒绝，避免误用不匹配的 KDIR 产物。
+KDIR  ?=
 PWD  := $(shell pwd)
 
 .PHONY: all clean clean-artifacts
 
 all:
+	@if [ -z "$(KDIR)" ]; then \
+		echo "拒绝本地编译：请用 ./build.sh 触发远程构建。" >&2; \
+		echo "如果确实需要指定内核树，显式传 KDIR=<path>。" >&2; \
+		exit 1; \
+	fi
 	$(MAKE) -j -C $(KDIR) M=$(PWD) modules
 	@llvm-objcopy --remove-section=.BTF --remove-section=.BTF.ext $(MODULE_NAME).ko 2>/dev/null || true
 	@llvm-strip --strip-debug $(MODULE_NAME).ko 2>/dev/null || strip --strip-debug $(MODULE_NAME).ko
