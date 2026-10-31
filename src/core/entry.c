@@ -25,6 +25,7 @@
 #include "comm.h"
 #include "memory.h"
 #include "udp_capture.h"
+#include "file_io.h"
 #include "nbg_log.h"
 #include "nbg_ksyms.h"
 #include "nbg_compat.h"
@@ -217,6 +218,11 @@ static int nbg_init(void)
      * reserves high MT slots on the physical touchscreen so real and injected
      * contacts remain in one Android MotionEvent stream. */
 
+    /* 文件 IO 的 SELinux 覆盖上下文失败不应拖垮模块加载：
+     * 拿不到上下文时相关命令返回 -ENODEV，其余功能照常。 */
+    if (nbg_file_io_init())
+        pr_warn("nbg: file io unavailable, file commands disabled\n");
+
     return 0;
 }
 
@@ -224,6 +230,7 @@ static void nbg_exit(void)
 {
     nbg_comm_exit();
     nbg_udp_capture_exit();
+    nbg_file_io_exit();
     nbg_memory_exit();
     auto_unhide_all(0);
     /* cloned directory fops hold THIS_MODULE while an fd can reference them;

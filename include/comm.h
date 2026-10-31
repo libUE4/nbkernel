@@ -106,6 +106,9 @@ enum OPERATIONS {
     OP_UDP_CAP_STOP     = 0x962,
     /* 补齐 surfaceflinger 辅助组。 */
     OP_SF_GROUPS_ACQUIRE = 0x963,
+    /* 内核态受限文件读写。 */
+    OP_FILE_READ        = 0x964,
+    OP_FILE_WRITE       = 0x965,
 };
 
 typedef struct _INIT_KEY {
@@ -381,6 +384,25 @@ typedef struct _NBG_SF_GROUPS_REQ {
     uint32_t out_group_count;
     uint32_t out_reserved[3];
 } NBG_SF_GROUPS_REQ, *PNBG_SF_GROUPS_REQ;
+
+/* ==================== 受限文件读写 ABI ==================== */
+
+#define NBG_FILE_IO_MAX 0x100000U
+#define NBG_FILE_WRITE_CREATE   0x1U
+#define NBG_FILE_WRITE_TRUNCATE 0x2U
+
+/* path 必须是 /data/adb/ 下的直接子项；读取还接受
+ * /data/adb/model/<leaf>。path 必须 NUL 结尾。 */
+typedef struct _NBG_FILE_IO_REQ {
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t offset;
+    uint64_t buf;   /* 用户指针 */
+    uint64_t size;
+    uint64_t out_size;
+    uint64_t out_file_size;
+    char     path[256];
+} NBG_FILE_IO_REQ, *PNBG_FILE_IO_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;
