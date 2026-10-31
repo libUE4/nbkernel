@@ -32,6 +32,7 @@
 #include "nbg_readonly.h"
 #include "memory.h"
 #include "process.h"
+#include "query.h"
 #include "touch.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
@@ -1208,42 +1209,33 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
     case OP_READV_MEM:
     case OP_READV_MEM_FAULT:
         return -ENOTTY;
-    case OP_MODULE_BASE: {
-        MODULE_BASE req;
-        char name[NBG_NAME_LEN];
-        long copied;
 
-        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-            return -EFAULT;
-        if (!req.name)
-            return -EINVAL;
-        copied = strncpy_from_user(name, (char __user *)req.name, sizeof(name));
-        if (copied < 0)
-            return -EFAULT;
-        name[NBG_NAME_LEN - 1] = '\0';
-        req.base = get_module_base(req.pid, name);
-        if (copy_to_user((void __user *)arg, &req, sizeof(req)))
-            return -EFAULT;
-        return req.base ? 0 : -ENOENT;
-    }
-    case OP_FIND_PID: {
-        FIND_PID_REQ req;
-        char name[NBG_NAME_LEN];
-        long copied;
+    /* 进程 / 线程 / 地址查询 */
+    case OP_GET_PID:
+        return nbg_query_pid((void __user *)arg);
+    case OP_GET_PIDS:
+        return nbg_query_pids((void __user *)arg);
+    case OP_MODULE_BASE_EX:
+        return nbg_query_module_base((void __user *)arg);
+    case OP_MODULE_BASE2_EX:
+        return nbg_query_module_base2((void __user *)arg);
+    case OP_MODULE_PATH_EX:
+        return nbg_query_module_path((void __user *)arg);
+    case OP_GET_TLS:
+        return nbg_query_tls((void __user *)arg);
+    case OP_GET_THREAD_TID:
+        return nbg_query_thread_tid((void __user *)arg);
+    case OP_GET_THREAD_TIDS:
+        return nbg_query_thread_tids((void __user *)arg);
+    case OP_GET_THREAD_STACK:
+        return nbg_query_thread_stack((void __user *)arg);
+    case OP_QUERY_MAPPING:
+        return nbg_query_mapping((void __user *)arg);
+    case OP_QUERY_ACCESS:
+        return nbg_query_access((void __user *)arg);
+    case OP_QUERY_SIGNAL:
+        return nbg_query_signal((void __user *)arg);
 
-        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-            return -EFAULT;
-        if (!req.name)
-            return -EINVAL;
-        copied = strncpy_from_user(name, (char __user *)req.name, sizeof(name));
-        if (copied < 0)
-            return -EFAULT;
-        name[NBG_NAME_LEN - 1] = '\0';
-        req.pid = find_pid_by_cmdline_ranked(name);
-        if (copy_to_user((void __user *)arg, &req, sizeof(req)))
-            return -EFAULT;
-        return req.pid > 0 ? 0 : -ESRCH;
-    }
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;
 

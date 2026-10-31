@@ -1,4 +1,4 @@
-/* process.c — 进程辅助查询(get_module_base / find_pid_by_name)*/
+/* process.c — 进程辅助查询（按包名/可执行名查 pid）*/
 
 #include "process.h"
 #include "memory.h"
@@ -23,96 +23,6 @@
  * 包含 "libfoo.so."（带版本号后缀），避免 strstr 误匹配同前缀的库。
  * 只取 vm_pgoff == 0 的 VMA，确保返回的是文件映射起始地址（真正的 base）。
  */
-static bool vma_name_match(const char *path, const char *name)
-{
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
-    if (strcmp(base, name) == 0)
-        return true;
-    /* 允许匹配带版本号后缀，如 name="libfoo.so" 匹配 "libfoo.so.6"。
-     * 收紧规则：版本号后缀必须全部是数字或点，避免病态名 "libfoo.so.evil" 误匹配。 */
-    if (strncmp(base, name, strlen(name)) == 0 && base[strlen(name)] == '.') {
-        const char *p = base + strlen(name) + 1;
-        for (; *p; p++) {
-            if (!((*p >= '0' && *p <= '9') || *p == '.'))
-                return false;
-        }
-        return true;
-    }
-    return false;
-}
-
-uintptr_t get_module_base(pid_t pid, const char *name)
-{
-    struct pid *pid_struct;
-    struct task_struct *task;
-    struct mm_struct *mm;
-    struct vm_area_struct *vma;
-    uintptr_t base = 0;
-    char *buf;
-
-    if (!name || !name[0])
-        return 0;
-
-    pid_struct = find_get_pid(pid);
-    if (!pid_struct)
-        return 0;
-
-    task = get_pid_task(pid_struct, PIDTYPE_PID);
-    put_pid(pid_struct);
-    if (!task)
-        return 0;
-
-    mm = get_task_mm(task);
-    put_task_struct(task);
-    if (!mm)
-        return 0;
-
-    /* d_path 需要 PATH_MAX 大小的缓冲区，kmalloc 避免大栈帧 */
-    buf = nbg_kmalloc(PATH_MAX, GFP_KERNEL);
-    if (!buf) {
-        mmput(mm);
-        return 0;
-    }
-
-    compat_mmap_read_lock(mm);
-
-#if USE_VMA_ITERATOR
-    {
-        VMA_ITERATOR(vmi, mm, 0);
-        for_each_vma(vmi, vma) {
-            char *filename;
-            if (!vma->vm_file || vma->vm_pgoff != 0)
-                continue;
-            filename = d_path(&vma->vm_file->f_path, buf, PATH_MAX);
-            if (!IS_ERR(filename) && vma_name_match(filename, name)) {
-                base = vma->vm_start;
-                break;
-            }
-        }
-    }
-#else
-    for (vma = mm->mmap; vma; vma = vma->vm_next) {
-        char *filename;
-        if (!vma->vm_file || vma->vm_pgoff != 0)
-            continue;
-        filename = d_path(&vma->vm_file->f_path, buf, PATH_MAX);
-        if (IS_ERR(filename))
-            continue;
-        if (vma_name_match(filename, name)) {
-            base = vma->vm_start;
-            break;
-        }
-    }
-#endif
-
-    compat_mmap_read_unlock(mm);
-    mmput(mm);
-    kfree(buf);
-
-    return base;
-}
-
 /* ==================== 按名字查 pid (零 procfs 暴露) ====================
  *
  * 这里直接在内核态遍历全局 tasklist:
