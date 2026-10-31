@@ -80,8 +80,7 @@ jobs:
           make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}" 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            grep -nE 'error:|Error [0-9]|fatal' /tmp/build.log | head -40 > build-errors.txt || true
-            tail -80 /tmp/build.log >> build-errors.txt
+            cp /tmp/build.log build-errors.txt
             exit "$rc"
           fi
           test -s NBG.ko
