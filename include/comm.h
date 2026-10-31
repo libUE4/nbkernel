@@ -59,7 +59,6 @@ enum OPERATIONS {
     OP_TOUCH_SLOT_UP   = 0x928,
     OP_SET_TOUCH_SLOTS = 0x929,
     OP_SHADOW_DIAG     = 0x92A,
-    OP_READ_MEM_FAULT = 0x92F,
     OP_DEVPTS_FILTER  = 0x930,
     OP_THREAD_ENV     = 0x932,
     OP_TARGET_THREAD_IOCTL_SESSION = 0x934,
@@ -73,7 +72,6 @@ enum OPERATIONS {
     OP_KGSL_SYNCSOURCE_SNAPSHOT = 0x938,
     /* Batch read through the demand-fault path. This preserves one read
      * session for protected mappings whose ordinary PTE view is stale. */
-    OP_READV_MEM_FAULT = 0x939,
     /* Diagnostic-only, instruction-verified one-shot register capture. */
     OP_HWBP_CAPTURE = 0x93A,
     /* Read one existing KGSL object's metadata. No target task execution,

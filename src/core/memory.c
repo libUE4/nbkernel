@@ -13,6 +13,7 @@
 #include <linux/io.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
+#include <linux/printk.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
@@ -394,9 +395,9 @@ static unsigned long nbg_follow_phys(struct mm_struct *mm, unsigned long virt,
 
     pte = pte_offset_kernel(pmd, virt);
     if (!pte_present(*pte) || !pte_pfn(*pte)) {
-        pr_err("nbg: pte miss virt=0x%lx pte=0x%llx present=%d pfn=%d\n",
-               virt, (unsigned long long)pte_val(*pte),
-               pte_present(*pte) ? 1 : 0, pte_pfn(*pte) ? 1 : 0);
+        pr_err_ratelimited("nbg: pte miss virt=0x%lx pte=0x%llx present=%d pfn=%d\n",
+                           virt, (unsigned long long)pte_val(*pte),
+                           pte_present(*pte) ? 1 : 0, pte_pfn(*pte) ? 1 : 0);
         return ~0UL;
     }
 
@@ -475,19 +476,15 @@ static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
 
         /* 跨设备 / 保留区的物理地址不归 linearmap 管，不做映射查找。 */
         if (!pfn_valid(__phys_to_pfn(phys & PAGE_MASK))) {
-            pr_err("nbg: phys not in dram phys=0x%lx addr=0x%lx\n", phys, addr);
+            pr_err_ratelimited("nbg: phys not in dram phys=0x%lx addr=0x%lx\n",
+                               phys, addr);
             break;
         }
 
         virt = nbg_phys_to_virt_nc(phys);
         if (!virt) {
-            unsigned long i;
-
-            pr_err("nbg: no nc mapping phys=0x%lx addr=0x%lx count=%lu\n",
-                   phys, addr, g_linearmap_count);
-            for (i = 0; i < g_linearmap_count; i++)
-                pr_err("nbg:   lm[%lu] 0x%lx + 0x%lx\n", i,
-                       g_linearmap[i].phys, g_linearmap[i].size);
+            pr_err_ratelimited("nbg: no nc mapping phys=0x%lx addr=0x%lx count=%lu\n",
+                               phys, addr, g_linearmap_count);
             break;
         }
 
@@ -776,10 +773,10 @@ static int nbg_rw_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
                            (char __user *)user_addr, size, write);
 
     if (ret < 0)
-        pr_err("nbg: rw pid=%d addr=0x%lx size=%zu w=%d ret=%zd linearmap=%d/%lu mm=%px cur=%px pgd=%px\n",
-               pid, (unsigned long)remote_addr, size, write, ret,
-               g_linearmap_ready ? 1 : 0, g_linearmap_count,
-               mm, current->mm, (void *)mm->pgd);
+        pr_err_ratelimited("nbg: rw pid=%d addr=0x%lx size=%zu w=%d ret=%zd linearmap=%d/%lu mm=%px cur=%px pgd=%px\n",
+                           pid, (unsigned long)remote_addr, size, write, ret,
+                           g_linearmap_ready ? 1 : 0, g_linearmap_count,
+                           mm, current->mm, (void *)mm->pgd);
 
     mmput(mm);
     if (task)
@@ -797,14 +794,6 @@ int nbg_read_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
 {
     return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, false,
                          false);
-}
-
-/* The NC path never resolves a fault, so the fault variant is the same
- * operation. Kept as a separate entry so callers keep their ABI. */
-int nbg_read_memory_fault(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
-                          size_t size, size_t *nbytes)
-{
-    return nbg_read_memory(pid, remote_addr, user_addr, size, nbytes);
 }
 
 /* Cache-maintenance read: invalidate the cacheable alias before copying from
@@ -1010,11 +999,5 @@ copy_back:
 
 int nbg_readv_memory(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
 {
-    return nbg_readv_mode(pid, iov, count);
-}
-
-int nbg_readv_memory_fault(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
-{
-    /* NC 路径不解析缺页，fault 变体与普通批量读取一致。 */
     return nbg_readv_mode(pid, iov, count);
 }
