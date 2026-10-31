@@ -14,6 +14,7 @@ $(MODULE_NAME)-objs := \
 	src/core/process.o \
 	src/core/query.o \
 	src/core/sensor_mem.o \
+	src/core/kgsl.o \
 	src/core/readonly.o \
 	src/core/target.o \
 	src/comm/socket_ioctl.o \

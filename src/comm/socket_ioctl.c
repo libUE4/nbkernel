@@ -34,6 +34,7 @@
 #include "process.h"
 #include "query.h"
 #include "sensor_mem.h"
+#include "kgsl.h"
 #include "touch.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
@@ -1304,6 +1305,10 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         return nbg_query_pacga((void __user *)arg);
     case OP_SENSOR_OPEN:
         return nbg_sensor_open((void __user *)arg);
+    case OP_KGSL_SYNC_PEEK:
+        return nbg_kgsl_syncsource_peek((void __user *)arg);
+    case OP_KGSL_QUERY_EX:
+        return nbg_kgsl_query((void __user *)arg);
 
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;
