@@ -379,6 +379,59 @@ static void test_signal(int tid, int signo)
         bad("ret=%d (%s)", ret, strerror(-ret));
 }
 
+
+static void test_pacga(int pid)
+{
+    NBG_PACGA_REQ req;
+    int ret;
+
+    printf("\n[OP_EXECUTE_PACGA] pid=%d\n", pid);
+
+    memset(&req, 0, sizeof(req));
+    req.pid = pid;
+    req.data = 0x1122334455667788ULL;
+    req.modifier = 0x99AABBCCDDEEFF00ULL;
+    ret = call(OP_EXECUTE_PACGA, &req);
+    if (ret) {
+        bad("ret=%d (%s)", ret, strerror(-ret));
+        return;
+    }
+
+    if (!req.out_supported) {
+        skip("内核未开指针认证或硬件无 generic-auth");
+        return;
+    }
+    ok("result=0x%016llx", (unsigned long long)req.out_result);
+
+    {
+        NBG_PACGA_REQ again;
+
+        memset(&again, 0, sizeof(again));
+        again.pid = pid;
+        again.data = req.data;
+        again.modifier = req.modifier;
+        if (call(OP_EXECUTE_PACGA, &again) == 0 &&
+            again.out_supported && again.out_result == req.out_result)
+            ok("重复调用结果一致");
+        else
+            bad("重复调用结果不一致");
+    }
+
+    {
+        NBG_PACGA_REQ diff;
+
+        memset(&diff, 0, sizeof(diff));
+        diff.pid = pid;
+        diff.data = req.data;
+        diff.modifier = req.modifier ^ 0xFFULL;
+        if (call(OP_EXECUTE_PACGA, &diff) == 0 && diff.out_supported &&
+            diff.out_result != req.out_result)
+            ok("修改 modifier 后结果变化");
+        else
+            bad("修改 modifier 后结果未变");
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *pkg = argc > 1 ? argv[1] : "com.tencent.tmgp.dfm";
@@ -433,6 +486,7 @@ int main(int argc, char **argv)
     /* 用模块真实基址，而不是肯定未映射的 0x400000。 */
     test_mapping(pid, find_module_base("libUE4.so"), 0x400000ULL);
     test_signal(pid, 11);
+    test_pacga(pid);
 
 done:
     printf("\n========================================\n");
