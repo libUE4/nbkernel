@@ -455,6 +455,12 @@ static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
         if (phys == ~0UL)
             break;
 
+        /* 跨设备 / 保留区的物理地址不归 linearmap 管，不做映射查找。 */
+        if (!pfn_valid(__phys_to_pfn(phys & PAGE_MASK))) {
+            pr_err("nbg: phys not in dram phys=0x%lx addr=0x%lx\n", phys, addr);
+            break;
+        }
+
         this_len = min(this_len, count);
         virt = nbg_phys_to_virt_nc(phys);
         if (!virt) {
@@ -604,7 +610,22 @@ int nbg_memory_init(void)
 
     init_rwsem(&g_linearmap_lock);
 
-    return nbg_linearmap_build();
+    {
+        int lr = nbg_linearmap_build();
+
+        pr_err("nbg: linearmap ret=%d count=%lu ready=%d\n", lr,
+               g_linearmap_count, g_linearmap_ready ? 1 : 0);
+        if (g_linearmap_count && g_linearmap) {
+            pr_err("nbg: lm[0] phys=0x%lx size=0x%lx virt=0x%lx\n",
+                   g_linearmap[0].phys, g_linearmap[0].size,
+                   g_linearmap[0].virt_nc);
+            pr_err("nbg: lm[last] phys=0x%lx size=0x%lx virt=0x%lx\n",
+                   g_linearmap[g_linearmap_count - 1].phys,
+                   g_linearmap[g_linearmap_count - 1].size,
+                   g_linearmap[g_linearmap_count - 1].virt_nc);
+        }
+        return lr;
+    }
 }
 
 void nbg_memory_cache_cleanup(void)
@@ -726,9 +747,10 @@ static int nbg_rw_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
                            (char __user *)user_addr, size, write);
 
     if (ret < 0)
-        pr_err("nbg: rw pid=%d addr=0x%lx size=%zu w=%d ret=%zd linearmap=%d/%lu\n",
+        pr_err("nbg: rw pid=%d addr=0x%lx size=%zu w=%d ret=%zd linearmap=%d/%lu mm=%px cur=%px pgd=%px\n",
                pid, (unsigned long)remote_addr, size, write, ret,
-               g_linearmap_ready ? 1 : 0, g_linearmap_count);
+               g_linearmap_ready ? 1 : 0, g_linearmap_count,
+               mm, current->mm, (void *)mm->pgd);
 
     mmput(mm);
     if (task)
