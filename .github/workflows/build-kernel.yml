@@ -80,17 +80,19 @@ jobs:
           make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}" 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            {
-              echo '## 编译失败'
-              echo '```'
-              grep -nE 'error|Error|错误|fatal' /tmp/build.log | head -40
-              echo '--- 尾部 ---'
-              tail -60 /tmp/build.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            grep -nE 'error:|Error [0-9]|fatal' /tmp/build.log | head -40 > build-errors.txt || true
+            tail -80 /tmp/build.log >> build-errors.txt
             exit "$rc"
           fi
           test -s NBG.ko
+
+      - name: Upload build errors
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-errors-android15-6.6
+          path: build-errors.txt
+          if-no-files-found: ignore
 
       - name: Verify kernel module
         run: |
