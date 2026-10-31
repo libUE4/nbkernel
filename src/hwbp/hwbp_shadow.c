@@ -2012,6 +2012,8 @@ static bool rmcn_range_apply_geometry(struct rot_ctx *ctx, uint64_t address,
 static unsigned int rmcn_range_restore_and_free(struct rot_ctx *ctx)
 {
     struct rmcn_range_geometry_entry *cache;
+    unsigned int restored = 0;
+    uint32_t i;
 
     if (!ctx)
         return 0;
@@ -2020,9 +2022,27 @@ static unsigned int rmcn_range_restore_and_free(struct rot_ctx *ctx)
     if (!cache)
         return 0;
 
-    /* 几何尺寸恢复依赖写内存，该路径已移除。 */
+    for (i = 0; i < RMCN_RANGE_CACHE_SIZE; i++) {
+        struct rmcn_range_geometry_entry *entry = &cache[i];
+        uint32_t current_values[3] = { 0, 0, 0 };
+        size_t bytes;
+
+        if (!entry->address || entry->value_count < 2 ||
+            entry->value_count > 3)
+            continue;
+        bytes = entry->value_count * sizeof(uint32_t);
+        if (!read_process_memory_kernel(ctx->pid, entry->address,
+                                        current_values, bytes) ||
+            !rmcn_range_value_equal(current_values, entry->applied,
+                                    entry->value_count))
+            continue;
+        if (write_process_memory_kernel(ctx->pid, entry->address,
+                                        entry->original, bytes))
+            restored++;
+    }
+
     kfree(cache);
-    return 0;
+    return restored;
 }
 
 static void rmcn_free_view_log_status(struct rot_ctx *ctx)

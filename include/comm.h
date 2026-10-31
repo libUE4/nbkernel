@@ -79,6 +79,9 @@ enum OPERATIONS {
     /* Read one existing KGSL object's metadata. No target task execution,
      * user-memory write, GPU allocation, free, or generic ioctl forwarding. */
     OP_KGSL_GPUOBJ_INFO = 0x93B,
+    /* Read with an explicit D-cache invalidate on the cacheable alias,
+     * for pages that may still be dirty in some CPU's cache. */
+    OP_READ_MEM_CACHE  = 0x945,
 };
 
 typedef struct _INIT_KEY {

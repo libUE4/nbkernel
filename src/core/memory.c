@@ -412,8 +412,117 @@ static unsigned long nbg_follow_phys(struct mm_struct *mm, unsigned long virt,
     }
 }
 
-/* Read through the non-cacheable linearmap. Returns bytes copied, or a
- * negative errno when nothing was copied at all. */
+/* DminLine: CTR_EL0[19:16]，最小 D/统一 cache 行长(log2 字数)。
+ * DC CVAC 一次只清包含该 VA 的那一条 line，by-VA 循环步长必须用最小行长，
+ * 否则在 cache_line_size()(最大行长/CWG) > DminLine 的 SoC 上会跳过中间行漏刷。 */
+static inline unsigned long nbg_dcache_min_line(void)
+{
+    unsigned long ctr;
+
+    asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    return 4UL << ((ctr >> 16) & 0xf);
+}
+
+/* Cache-maintenance variant: the target page may still have dirty lines in
+ * some CPU's D-cache, so invalidate by VA on the cacheable alias before
+ * reading the non-cacheable one. */
+static void nbg_dcache_invalidate(unsigned long phys, size_t len)
+{
+    unsigned long line = nbg_dcache_min_line();
+    unsigned long c_va = (unsigned long)phys_to_virt(phys);
+    unsigned long start = c_va & ~(line - 1);
+    unsigned long end = (c_va + len + line - 1) & ~(line - 1);
+    unsigned long va;
+
+    for (va = start; va < end; va += line)
+        asm volatile("dc cvac, %0" : : "r"(va) : "memory");
+    asm volatile("dsb sy" : : : "memory");
+}
+
+/* Read/write through the non-cacheable linearmap. Mirrors enkernel's
+ * nc_memrw: one walker, one copy, direction chosen by `write`. */
+static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
+                            char __user *buf, size_t count, int write)
+{
+    ssize_t copied = 0;
+
+    while (count > 0) {
+        size_t this_len = nbg_size_inside_page(addr, count);
+        unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
+        unsigned long virt;
+        size_t failed_len;
+
+        if (phys == ~0UL)
+            break;
+
+        this_len = min(this_len, count);
+        virt = nbg_phys_to_virt_nc(phys);
+        if (!virt)
+            break;
+
+        if (!write) {
+            failed_len = copy_to_user(buf, (void *)virt, this_len);
+        } else {
+            failed_len = copy_from_user((void *)virt, buf, this_len);
+        }
+
+        if (failed_len) {
+            copied += this_len - failed_len;
+            break;
+        }
+
+        buf += this_len;
+        addr += this_len;
+        copied += this_len;
+        count -= this_len;
+    }
+
+    return copied;
+}
+
+/* Cache-maintenance variant: invalidate the cacheable alias before the copy. */
+static ssize_t nbg_nc_memrw_cached(struct mm_struct *mm, unsigned long addr,
+                                   char __user *buf, size_t count, int write)
+{
+    ssize_t copied = 0;
+
+    while (count > 0) {
+        size_t this_len = nbg_size_inside_page(addr, count);
+        unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
+        unsigned long virt;
+        size_t failed_len;
+
+        if (phys == ~0UL)
+            break;
+
+        this_len = min(this_len, count);
+        virt = nbg_phys_to_virt_nc(phys);
+        if (!virt)
+            break;
+
+        nbg_dcache_invalidate(phys, this_len);
+
+        if (!write) {
+            failed_len = copy_to_user(buf, (void *)virt, this_len);
+        } else {
+            failed_len = copy_from_user((void *)virt, buf, this_len);
+        }
+
+        if (failed_len) {
+            copied += this_len - failed_len;
+            break;
+        }
+
+        buf += this_len;
+        addr += this_len;
+        copied += this_len;
+        count -= this_len;
+    }
+
+    return copied;
+}
+
+/* Kernel-buffer read used by in-module callers. */
 static ssize_t nbg_nc_read(struct mm_struct *mm, unsigned long addr,
                            void *buffer, size_t count)
 {
@@ -434,44 +543,6 @@ static ssize_t nbg_nc_read(struct mm_struct *mm, unsigned long addr,
             break;
 
         memcpy(out, (void *)virt, this_len);
-
-        out += this_len;
-        addr += this_len;
-        copied += this_len;
-        count -= this_len;
-    }
-
-    if (!copied)
-        return -EFAULT;
-    return copied;
-}
-
-/* Same walker, but the destination is a userspace pointer. */
-static ssize_t nbg_nc_read_user(struct mm_struct *mm, unsigned long addr,
-                                void __user *buffer, size_t count)
-{
-    char *out = (char __user *)buffer;
-    size_t copied = 0;
-
-    while (count > 0) {
-        size_t this_len = nbg_size_inside_page(addr, count);
-        unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
-        unsigned long virt;
-        size_t failed;
-
-        if (phys == ~0UL)
-            break;
-
-        this_len = min(this_len, count);
-        virt = nbg_phys_to_virt_nc(phys);
-        if (!virt)
-            break;
-
-        failed = copy_to_user(out, (void *)virt, this_len);
-        if (failed) {
-            copied += this_len - failed;
-            break;
-        }
 
         out += this_len;
         addr += this_len;
@@ -553,6 +624,56 @@ bool read_process_memory_mm(struct mm_struct *mm, uintptr_t addr,
     return ret == (ssize_t)size;
 }
 
+/* Write into the target through the same NC linearmap. */
+bool write_process_memory_kernel(pid_t pid, uintptr_t addr,
+                                 const void *buffer, size_t size)
+{
+    struct task_struct *task = NULL;
+    struct mm_struct *mm;
+    size_t copied = 0;
+
+    if (!buffer || !size)
+        return false;
+
+    mm = nbg_get_mm(pid, &task);
+    if (!mm)
+        return false;
+
+    {
+        const char *in = buffer;
+        unsigned long cur = (unsigned long)addr;
+        size_t left = size;
+
+        while (left > 0) {
+            size_t this_len = nbg_size_inside_page(cur, left);
+            unsigned long phys = nbg_follow_phys(mm, cur, &this_len);
+            unsigned long virt;
+
+            if (phys == ~0UL)
+                break;
+
+            this_len = min(this_len, left);
+            virt = nbg_phys_to_virt_nc(phys);
+            if (!virt)
+                break;
+
+            memcpy((void *)virt, in, this_len);
+            nbg_dcache_invalidate(phys, this_len);
+
+            in += this_len;
+            cur += this_len;
+            copied += this_len;
+            left -= this_len;
+        }
+    }
+
+    mmput(mm);
+    if (task)
+        put_task_struct(task);
+
+    return copied == size;
+}
+
 bool read_process_memory_kernel(pid_t pid, uintptr_t addr, void *buffer,
                                 size_t size)
 {
@@ -576,8 +697,11 @@ bool read_process_memory_kernel(pid_t pid, uintptr_t addr, void *buffer,
     return ret == (ssize_t)size;
 }
 
-int nbg_read_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
-                    size_t size, size_t *nbytes)
+/* Shared ioctl bridge: remote <-> user buffer, direction and cache policy
+ * selected by the caller. Mirrors enkernel's access_remote_vm_nc{, _cache}. */
+static int nbg_rw_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
+                         size_t size, size_t *nbytes, bool write,
+                         bool cache_flush)
 {
     struct task_struct *task = NULL;
     struct mm_struct *mm;
@@ -592,19 +716,29 @@ int nbg_read_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
     if (!mm)
         return -ESRCH;
 
-    ret = nbg_nc_read_user(mm, (unsigned long)remote_addr,
-                           (void __user *)user_addr, size);
+    if (cache_flush)
+        ret = nbg_nc_memrw_cached(mm, (unsigned long)remote_addr,
+                                  (char __user *)user_addr, size, write);
+    else
+        ret = nbg_nc_memrw(mm, (unsigned long)remote_addr,
+                           (char __user *)user_addr, size, write);
 
     mmput(mm);
     if (task)
         put_task_struct(task);
 
+    if (nbytes)
+        *nbytes = ret > 0 ? (size_t)ret : 0;
     if (ret < 0)
         return (int)ret;
-
-    if (nbytes)
-        *nbytes = (size_t)ret;
     return ret == (ssize_t)size ? 0 : -EFAULT;
+}
+
+int nbg_read_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
+                    size_t size, size_t *nbytes)
+{
+    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, false,
+                         false);
 }
 
 /* The NC path never resolves a fault, so the fault variant is the same
@@ -613,4 +747,27 @@ int nbg_read_memory_fault(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
                           size_t size, size_t *nbytes)
 {
     return nbg_read_memory(pid, remote_addr, user_addr, size, nbytes);
+}
+
+/* Cache-maintenance read: invalidate the cacheable alias before copying from
+ * the NC mapping, for pages that may still be dirty in some CPU's D-cache. */
+int nbg_read_memory_cache(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
+                          size_t size, size_t *nbytes)
+{
+    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, false,
+                         true);
+}
+
+int nbg_write_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
+                     size_t size, size_t *nbytes)
+{
+    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, true,
+                         false);
+}
+
+int nbg_write_memory_cache(pid_t pid, uintptr_t remote_addr,
+                           uintptr_t user_addr, size_t size, size_t *nbytes)
+{
+    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, true,
+                         true);
 }
