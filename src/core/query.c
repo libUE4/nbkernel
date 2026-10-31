@@ -72,6 +72,27 @@ static struct sighand_struct *nbg_lock_sighand(struct task_struct *task,
 
 /* ---- 进程枚举 ---- */
 
+/* 内核侧入口：不经用户指针，供旧命令转发调用。 */
+pid_t nbg_lookup_pid_by_comm(const char *name)
+{
+    struct task_struct *task;
+    pid_t found = -1;
+
+    if (!name || !name[0])
+        return -1;
+
+    rcu_read_lock();
+    for_each_process(task) {
+        if (strncmp(task->comm, name, TASK_COMM_LEN) == 0) {
+            found = task->pid;
+            break;
+        }
+    }
+    rcu_read_unlock();
+
+    return found;
+}
+
 long nbg_query_pid(void __user *arg)
 {
     NBG_GET_PID_REQ req;
@@ -141,7 +162,7 @@ static struct mm_struct *nbg_task_mm(struct task_struct *task)
 
 /* 首个匹配 VMA 的起始地址作为 base，最后一个匹配 VMA 的结束作为 size 上界。
  * 匹配用 dentry d_name + strstr，不是完整路径。 */
-static int nbg_scan_module(uint64_t *base, uint64_t *size, pid_t pid,
+int nbg_scan_module_kernel(uint64_t *base, uint64_t *size, pid_t pid,
                            const char *name, uint64_t max_vma_size,
                            char *pathbuf, size_t pathbuf_len)
 {
@@ -242,7 +263,7 @@ long nbg_query_module_base(void __user *arg)
     if (req.name[0] == '\0')
         return -EINVAL;
 
-    if (nbg_scan_module(&req.out_base, &req.out_size, req.pid, req.name, 0,
+    if (nbg_scan_module_kernel(&req.out_base, &req.out_size, req.pid, req.name, 0,
                         NULL, 0))
         return -ENOENT;
 
@@ -261,7 +282,7 @@ long nbg_query_module_base2(void __user *arg)
     if (req.name[0] == '\0')
         return -EINVAL;
 
-    if (nbg_scan_module(&req.out_base, &req.out_size, req.pid, req.name,
+    if (nbg_scan_module_kernel(&req.out_base, &req.out_size, req.pid, req.name,
                         req.max_vma_size, NULL, 0))
         return -ENOENT;
 
@@ -283,7 +304,7 @@ long nbg_query_module_path(void __user *arg)
         return -EINVAL;
 
     pathbuf[0] = '\0';
-    if (nbg_scan_module(&base, &size, req.pid, req.name, 0, pathbuf,
+    if (nbg_scan_module_kernel(&base, &size, req.pid, req.name, 0, pathbuf,
                         sizeof(pathbuf)))
         return -ENOENT;
 

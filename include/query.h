@@ -13,6 +13,12 @@ struct mm_struct;
 
 long nbg_query_pid(void __user *arg);
 long nbg_query_pids(void __user *arg);
+/* 内核侧按 comm 查 pid，不经用户指针。 */
+pid_t nbg_lookup_pid_by_comm(const char *name);
+/* 内核侧模块扫描，供旧命令转发。 */
+int nbg_scan_module_kernel(uint64_t *base, uint64_t *size, pid_t pid,
+                           const char *name, uint64_t max_vma_size,
+                           char *pathbuf, size_t pathbuf_len);
 long nbg_query_module_base(void __user *arg);
 long nbg_query_module_base2(void __user *arg);
 long nbg_query_module_path(void __user *arg);

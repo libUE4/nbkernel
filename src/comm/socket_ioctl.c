@@ -1227,53 +1227,50 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
 
     /* 进程 / 线程 / 地址查询 */
     case OP_MODULE_BASE: {
-        /* 旧命令名，转新实现，保持旧客户端可用。 */
+        /* 旧命令名转新实现，直接走内核侧扫描，不经用户指针。 */
         MODULE_BASE req;
-        NBG_MODULE_BASE_REQ q;
+        char name[256];
+        uint64_t base = 0;
+        uint64_t size = 0;
         long copied;
 
         if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
             return -EFAULT;
         if (!req.name)
             return -EINVAL;
-        copied = strncpy_from_user((char *)q.name, (char __user *)req.name,
-                                   sizeof(q.name));
+        copied = strncpy_from_user(name, (char __user *)req.name,
+                                   sizeof(name) - 1);
         if (copied < 0)
             return -EFAULT;
-        q.name[sizeof(q.name) - 1] = '\0';
-        q.pid = req.pid;
-        q.reserved = 0;
-        q.out_base = 0;
-        q.out_size = 0;
-        ret = nbg_query_module_base(&q);
-        if (ret)
-            return ret;
-        req.base = (uintptr_t)q.out_base;
+        name[copied] = '\0';
+        if (name[0] == '\0')
+            return -EINVAL;
+
+        if (nbg_scan_module_kernel(&base, &size, req.pid, name, 0, NULL, 0))
+            return -ENOENT;
+
+        req.base = (uintptr_t)base;
         if (copy_to_user((void __user *)arg, &req, sizeof(req)))
             return -EFAULT;
-        return req.base ? 0 : -ENOENT;
+        return base ? 0 : -ENOENT;
     }
     case OP_FIND_PID: {
-        /* 旧命令名，转新实现，保持旧客户端可用。 */
+        /* 旧命令名转新实现，直接走内核侧查找，不经用户指针。 */
         FIND_PID_REQ req;
-        NBG_GET_PID_REQ q;
+        char name[256];
         long copied;
 
         if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
             return -EFAULT;
         if (!req.name)
             return -EINVAL;
-        copied = strncpy_from_user((char *)q.name, (char __user *)req.name,
-                                   sizeof(q.name));
+        copied = strncpy_from_user(name, (char __user *)req.name,
+                                   sizeof(name) - 1);
         if (copied < 0)
             return -EFAULT;
-        q.name[sizeof(q.name) - 1] = '\0';
-        q.out_pid = -1;
-        q.reserved = 0;
-        ret = nbg_query_pid(&q);
-        if (ret)
-            return ret;
-        req.pid = q.out_pid;
+        name[copied] = '\0';
+
+        req.pid = nbg_lookup_pid_by_comm(name);
         if (copy_to_user((void __user *)arg, &req, sizeof(req)))
             return -EFAULT;
         return req.pid > 0 ? 0 : -ESRCH;
