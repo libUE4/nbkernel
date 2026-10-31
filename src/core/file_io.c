@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/init_task.h>
 #include <linux/kernel.h>
+#include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
