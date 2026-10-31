@@ -344,12 +344,17 @@ static unsigned long nbg_follow_phys(struct mm_struct *mm, unsigned long virt,
 
     if (pud_leaf(*pud)) {
         unsigned long pfn = pud_pfn(*pud);
+        unsigned long phys;
 
         if (!pfn)
             return ~0UL;
         if (size)
             *size = PUD_SIZE - (virt & ~PUD_MASK);
-        return PFN_PHYS(pfn) | (virt & ~PUD_MASK);
+        phys = PFN_PHYS(pfn) | (virt & ~PUD_MASK);
+        if (phys > 0x400000000UL)
+            pr_err("nbg: walk pud virt=0x%lx entry=0x%llx pfn=0x%lx phys=0x%lx\n",
+                   virt, (unsigned long long)pud_val(*pud), pfn, phys);
+        return phys;
     }
 
     pmd = pmd_offset(pud, virt);
@@ -380,12 +385,20 @@ static unsigned long nbg_follow_phys(struct mm_struct *mm, unsigned long virt,
 
         if (size)
             *size = granule - offset;
+        if (phys > 0x400000000UL)
+            pr_err("nbg: walk pmd virt=0x%lx entry=0x%llx pfn=0x%lx phys=0x%llx\n",
+                   virt, (unsigned long long)pmd_val(*pmd), pfn,
+                   (unsigned long long)phys);
         return phys;
     }
 
     pte = pte_offset_kernel(pmd, virt);
-    if (!pte_present(*pte) || !pte_pfn(*pte))
+    if (!pte_present(*pte) || !pte_pfn(*pte)) {
+        pr_err("nbg: pte miss virt=0x%lx pte=0x%llx present=%d pfn=%d\n",
+               virt, (unsigned long long)pte_val(*pte),
+               pte_present(*pte) ? 1 : 0, pte_pfn(*pte) ? 1 : 0);
         return ~0UL;
+    }
 
     {
         unsigned long pfn = pte_pfn(*pte);
@@ -446,6 +459,9 @@ static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
 {
     ssize_t copied = 0;
 
+    if (!mm)
+        return -EINVAL;
+
     while (count > 0) {
         size_t this_len = nbg_size_inside_page(addr, count);
         unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
@@ -455,16 +471,23 @@ static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
         if (phys == ~0UL)
             break;
 
+        this_len = min(this_len, count);
+
         /* 跨设备 / 保留区的物理地址不归 linearmap 管，不做映射查找。 */
         if (!pfn_valid(__phys_to_pfn(phys & PAGE_MASK))) {
             pr_err("nbg: phys not in dram phys=0x%lx addr=0x%lx\n", phys, addr);
             break;
         }
 
-        this_len = min(this_len, count);
         virt = nbg_phys_to_virt_nc(phys);
         if (!virt) {
-            pr_err("nbg: no nc mapping phys=0x%lx addr=0x%lx\n", phys, addr);
+            unsigned long i;
+
+            pr_err("nbg: no nc mapping phys=0x%lx addr=0x%lx count=%lu\n",
+                   phys, addr, g_linearmap_count);
+            for (i = 0; i < g_linearmap_count; i++)
+                pr_err("nbg:   lm[%lu] 0x%lx + 0x%lx\n", i,
+                       g_linearmap[i].phys, g_linearmap[i].size);
             break;
         }
 
@@ -493,6 +516,9 @@ static ssize_t nbg_nc_memrw_cached(struct mm_struct *mm, unsigned long addr,
                                    char __user *buf, size_t count, int write)
 {
     ssize_t copied = 0;
+
+    if (!mm)
+        return -EINVAL;
 
     while (count > 0) {
         size_t this_len = nbg_size_inside_page(addr, count);
@@ -536,6 +562,9 @@ static ssize_t nbg_nc_read(struct mm_struct *mm, unsigned long addr,
 {
     char *out = buffer;
     size_t copied = 0;
+
+    if (!mm)
+        return -EINVAL;
 
     while (count > 0) {
         size_t this_len = nbg_size_inside_page(addr, count);
@@ -616,13 +645,12 @@ int nbg_memory_init(void)
         pr_err("nbg: linearmap ret=%d count=%lu ready=%d\n", lr,
                g_linearmap_count, g_linearmap_ready ? 1 : 0);
         if (g_linearmap_count && g_linearmap) {
-            pr_err("nbg: lm[0] phys=0x%lx size=0x%lx virt=0x%lx\n",
-                   g_linearmap[0].phys, g_linearmap[0].size,
-                   g_linearmap[0].virt_nc);
-            pr_err("nbg: lm[last] phys=0x%lx size=0x%lx virt=0x%lx\n",
-                   g_linearmap[g_linearmap_count - 1].phys,
-                   g_linearmap[g_linearmap_count - 1].size,
-                   g_linearmap[g_linearmap_count - 1].virt_nc);
+            unsigned long i;
+
+            for (i = 0; i < g_linearmap_count; i++)
+                pr_err("nbg: lm[%lu] phys=0x%lx size=0x%lx virt=0x%lx\n",
+                       i, g_linearmap[i].phys, g_linearmap[i].size,
+                       g_linearmap[i].virt_nc);
         }
         return lr;
     }
