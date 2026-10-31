@@ -72,6 +72,7 @@ static u64 g_udp_captured;
 static u32 g_udp_head;
 static u32 g_udp_tail;
 static u32 g_udp_count;
+static atomic64_t g_udp_hits = ATOMIC64_INIT(0);
 
 static struct nbg_udp_packet *g_udp_pool;
 static struct nbg_udp_packet *g_udp_ring[UDP_CAP_RING];
@@ -165,6 +166,7 @@ static int nbg_udp_rcv_pre(struct kprobe *p, struct pt_regs *regs)
     unsigned long flags;
 
     (void)p;
+    atomic64_inc(&g_udp_hits);
     if (!smp_load_acquire(&g_udp_enabled))
         return 0;
 
@@ -370,7 +372,7 @@ long nbg_udp_capture_read(void __user *arg)
     req.out_count = n;
     req.overflow = g_udp_overflow;
     req.captured = g_udp_captured;
-    req.reserved = 0;
+    req.reserved = (u32)atomic64_read(&g_udp_hits);
     spin_unlock_irqrestore(&g_udp_lock, flags);
 
     /* 摘下的槽归读取方私有，即使环形缓冲回绕或被重置也不受影响。
