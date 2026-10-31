@@ -15,7 +15,6 @@ $(MODULE_NAME)-objs := \
 	src/core/query.o \
 	src/core/udp_capture.o \
 	src/core/sf_groups.o \
-	src/core/file_io.o \
 	src/core/sensor_mem.o \
 	src/core/readonly.o \
 	src/core/target.o \

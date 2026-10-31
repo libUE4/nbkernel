@@ -75,31 +75,10 @@ jobs:
           persist-credentials: false
 
       - name: Build kernel module
-        id: build
         run: |
-          set +e
-          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}" > /tmp/build.log 2>&1
-          rc=$?
-          cat /tmp/build.log
-          if [ "$rc" -ne 0 ]; then
-            {
-              echo '### 编译错误'
-              echo '```'
-              grep -nE 'error:' /tmp/build.log | head -30
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "failed=1" >> "$GITHUB_OUTPUT"
-            exit "$rc"
-          fi
+          set -euo pipefail
+          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}"
           test -s NBG.ko
-
-      - name: Upload build errors
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-errors-android15-6.6
-          path: build-errors.txt
-          if-no-files-found: ignore
 
       - name: Verify kernel module
         run: |
