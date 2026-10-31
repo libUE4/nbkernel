@@ -100,9 +100,6 @@ enum OPERATIONS {
     OP_EXECUTE_PACGA    = 0x95C,
     /* 打开 system_server 受限写会话。 */
     OP_SENSOR_OPEN      = 0x95D,
-    /* KGSL 只读查询。 */
-    OP_KGSL_SYNC_PEEK   = 0x95E,
-    OP_KGSL_QUERY_EX    = 0x95F,
 };
 
 typedef struct _INIT_KEY {
@@ -323,60 +320,6 @@ typedef struct _NBG_SENSOR_ARM_REQ {
     _IOW('S', 1, NBG_SENSOR_ARM_REQ)
 #define NBG_SENSOR_IOC_QUERY_ACCESS \
     _IOWR('S', 2, NBG_QUERY_ACCESS_REQ)
-
-/* ==================== KGSL 查询 ABI ==================== */
-
-#define NBG_KGSL_SYNC_ABI_VERSION 1U
-#define NBG_KGSL_SYNC_BACKEND_IDR_RCU 1U
-
-/* 只读预测 syncsource CREATE 会分配的 ID。
- * 不调用 KGSL ioctl、不插入/删除 ID；结果是建议值，不是预留。 */
-typedef struct _NBG_KGSL_SYNC_PEEK_REQ {
-    int32_t kgsl_fd;
-    uint32_t min_id;
-    uint32_t flags;
-    uint32_t abi_version;
-    uint32_t out_id;
-    uint32_t out_backend;
-    uint32_t reserved[2];
-} NBG_KGSL_SYNC_PEEK_REQ, *PNBG_KGSL_SYNC_PEEK_REQ;
-
-#define NBG_KGSL_QUERY_ABI_VERSION 1U
-#define NBG_KGSL_QUERY_VALIDATE_FD 1U
-#define NBG_KGSL_QUERY_SYNCSOURCE_PEEK 2U
-#define NBG_KGSL_QUERY_GPUOBJ_INFO 3U
-#define NBG_KGSL_QUERY_MAX_EXCLUDED_IDS 4096U
-#define NBG_KGSL_QUERY_BACKEND_FILE 1U
-#define NBG_KGSL_QUERY_BACKEND_IDR_RCU 2U
-#define NBG_KGSL_QUERY_BACKEND_NATIVE_INFO 3U
-
-typedef struct _NBG_KGSL_GPUOBJ_INFO {
-    uint64_t gpuaddr;
-    uint64_t flags;
-    uint64_t size;
-    uint64_t va_len;
-    uint64_t va_addr;
-    uint32_t id;
-    uint32_t padding;
-} NBG_KGSL_GPUOBJ_INFO, *PNBG_KGSL_GPUOBJ_INFO;
-
-typedef struct _NBG_KGSL_QUERY_REQ {
-    uint32_t abi_version;
-    uint32_t op;
-    int32_t pid;
-    uint32_t target_fd;
-    uint32_t min_id;
-    uint32_t object_id;
-    uint32_t excluded_count;
-    uint32_t flags;
-    uint64_t excluded_ids; /* 用户指针，绝不是内核指针 */
-    uint32_t out_id;
-    uint32_t out_backend;
-    int32_t out_errno;
-    uint32_t out_fail_stage;
-    NBG_KGSL_GPUOBJ_INFO out_info;
-    uint64_t reserved[2];
-} NBG_KGSL_QUERY_REQ, *PNBG_KGSL_QUERY_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;

@@ -237,28 +237,4 @@ static __maybe_unused int nbg_register_kretprobe_addr(
     return register_kretprobe(krp);
 }
 
-/* kallsyms_lookup_size_offset 包装：KGSL 指纹用它区分函数本体与跳板。
- * 该符号在部分 GKI 分支不导出，统一走 kallsyms 解析。 */
-typedef int (*nbg_ksym_size_offset_t)(unsigned long addr, unsigned long *size,
-                                      unsigned long *offset);
-
-static __maybe_unused int nbg_ksym_size_offset(unsigned long addr,
-                                               unsigned long *size,
-                                               unsigned long *offset)
-{
-    static nbg_ksym_size_offset_t cached;
-
-    if (!cached)
-        cached = (nbg_ksym_size_offset_t)
-            generic_kallsyms_lookup_name("kallsyms_lookup_size_offset");
-    if (!cached || !size || !offset)
-        return 0;
-    return cached(addr, size, offset);
-}
-
-static __maybe_unused unsigned long nbg_ksym_lookup_name(const char *name)
-{
-    return generic_kallsyms_lookup_name(name);
-}
-
 #endif /* _NBG_EXPORT_FUN_H_ */
