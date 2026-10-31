@@ -878,3 +878,74 @@ long nbg_query_signal(void __user *arg)
         return ret;
     return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
 }
+
+/* ---- PACGA ---- */
+
+#ifdef CONFIG_ARM64_PTR_AUTH
+/* 在当前 EL 发出 PACGA：X8 = PACGA(X8, X9)，密钥来自 APGAKey_EL1。
+ * 用寄存器约束把操作数钉在 x8/x9，避免编译器插入搬移；
+ * 裸 .inst 避免整 TU 开 -march=armv8.3-a。PACGA 不触碰内存。 */
+static __always_inline u64 nbg_do_hw_pacga(u64 data, u64 modifier)
+{
+    register u64 x8 __asm__("x8") = data;
+    register u64 x9 __asm__("x9") = modifier;
+
+    /* 0x9AC93108 = pacga x8, x8, x9 */
+    asm volatile(".inst 0x9AC93108" : "+r"(x8) : "r"(x9));
+    return x8;
+}
+#endif
+
+long nbg_query_pacga(void __user *arg)
+{
+    NBG_PACGA_REQ req;
+    struct task_struct *task;
+#ifdef CONFIG_ARM64_PTR_AUTH
+    struct ptrauth_key guest_apga = {};
+    bool have_generic_auth = false;
+#endif
+
+    if (copy_from_user(&req, arg, sizeof(req)))
+        return -EFAULT;
+    if (req.pid <= 0)
+        return -EINVAL;
+
+    req.out_supported = 0;
+    req.out_result = 0;
+
+    task = nbg_find_task(req.pid);
+    if (!task)
+        return -ESRCH;
+
+#ifdef CONFIG_ARM64_PTR_AUTH
+    /* CONFIG_ARM64_PTR_AUTH 可能只开了地址认证而没有 generic-auth 硬件，
+     * 那样执行 PACGA 会 UNDEF 并带崩内核，必须运行时判定。 */
+    have_generic_auth = system_supports_generic_auth();
+    if (have_generic_auth)
+        guest_apga = task->thread.keys_user.apga;
+#endif
+
+    put_task_struct(task);
+
+#ifdef CONFIG_ARM64_PTR_AUTH
+    if (have_generic_auth) {
+        unsigned long flags;
+        u64 result;
+
+        /* local_irq_save 保证整个序列不会被调度出去，
+         * 因此恢复用的密钥可直接取 current->thread.keys_user.apga。 */
+        local_irq_save(flags);
+        __ptrauth_key_install_nosync(APGA, guest_apga);
+        isb();
+        result = nbg_do_hw_pacga(req.data, req.modifier);
+        __ptrauth_key_install_nosync(APGA, current->thread.keys_user.apga);
+        isb();
+        local_irq_restore(flags);
+
+        req.out_supported = 1;
+        req.out_result = result;
+    }
+#endif
+
+    return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
+}

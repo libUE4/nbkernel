@@ -31,5 +31,6 @@ int nbg_query_access_mm(struct mm_struct *mm, unsigned long addr,
                         NBG_QUERY_ACCESS_REQ *req);
 long nbg_query_access(void __user *arg);
 long nbg_query_signal(void __user *arg);
+long nbg_query_pacga(void __user *arg);
 
 #endif /* _NBG_QUERY_H */

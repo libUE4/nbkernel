@@ -96,6 +96,8 @@ enum OPERATIONS {
     OP_QUERY_MAPPING    = 0x959,
     OP_QUERY_ACCESS     = 0x95A,
     OP_QUERY_SIGNAL     = 0x95B,
+    /* 以目标线程的 APGA 密钥执行一次 PACGA。 */
+    OP_EXECUTE_PACGA    = 0x95C,
 };
 
 typedef struct _INIT_KEY {
@@ -271,6 +273,17 @@ typedef struct _NBG_QUERY_SIGNAL_REQ {
     uint32_t out_alt_flags;
     int32_t out_tgid;
 } NBG_QUERY_SIGNAL_REQ, *PNBG_QUERY_SIGNAL_REQ;
+
+/* 在目标线程的 APGA 密钥下执行 PACGA(data, modifier)。
+ * out_supported=0 表示内核未开指针认证或硬件无 generic-auth，
+ * 此时 out_result 为 0，调用方应回退。 */
+typedef struct _NBG_PACGA_REQ {
+    int32_t pid;
+    int32_t out_supported;
+    uint64_t data;
+    uint64_t modifier;
+    uint64_t out_result;
+} NBG_PACGA_REQ, *PNBG_PACGA_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;
