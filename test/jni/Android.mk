@@ -48,3 +48,10 @@ LOCAL_SRC_FILES := ../pid_visibility_probe.cpp
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/../.. $(LOCAL_PATH)/../../include
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti
 include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := query_probe
+LOCAL_SRC_FILES := ../query_probe.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/../.. $(LOCAL_PATH)/../../include
+LOCAL_CFLAGS := -O2
+include $(BUILD_EXECUTABLE)
