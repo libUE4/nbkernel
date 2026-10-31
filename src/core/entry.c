@@ -222,7 +222,7 @@ static int nbg_init(void)
 static void nbg_exit(void)
 {
     nbg_comm_exit();
-    nbg_memory_cache_cleanup();
+    nbg_memory_exit();
     auto_unhide_all(0);
     /* cloned directory fops hold THIS_MODULE while an fd can reference them;
      * module_exit is reached only after those references are gone. */

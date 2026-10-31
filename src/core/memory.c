@@ -658,6 +658,12 @@ int nbg_memory_init(void)
 
 void nbg_memory_cache_cleanup(void)
 {
+    /* 保留旧 API 供最后一个客户端断开时调用；linearmap 属于模块级状态，
+     * 不能随客户端 socket 生命周期销毁。 */
+}
+
+void nbg_memory_exit(void)
+{
     down_write(&g_linearmap_lock);
     nbg_linearmap_destroy_locked();
     up_write(&g_linearmap_lock);

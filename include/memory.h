@@ -14,6 +14,7 @@ struct mm_struct;
 
 int nbg_memory_init(void);
 void nbg_memory_cache_cleanup(void);
+void nbg_memory_exit(void);
 
 /* 内核 buffer 直读，免 copy_to_user */
 bool read_process_memory_kernel(pid_t pid, uintptr_t addr, void *buffer,
