@@ -35,6 +35,7 @@
 #include "query.h"
 #include "sensor_mem.h"
 #include "udp_capture.h"
+#include "sf_groups.h"
 #include "touch.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
@@ -1311,6 +1312,8 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         return nbg_udp_capture_read((void __user *)arg);
     case OP_UDP_CAP_STOP:
         return nbg_udp_capture_stop();
+    case OP_SF_GROUPS_ACQUIRE:
+        return nbg_sf_groups_acquire((void __user *)arg);
 
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;

@@ -104,6 +104,8 @@ enum OPERATIONS {
     OP_UDP_CAP_INIT     = 0x960,
     OP_UDP_CAP_READ     = 0x961,
     OP_UDP_CAP_STOP     = 0x962,
+    /* 补齐 surfaceflinger 辅助组。 */
+    OP_SF_GROUPS_ACQUIRE = 0x963,
 };
 
 typedef struct _INIT_KEY {
@@ -362,6 +364,23 @@ typedef struct _NBG_UDP_CAP_READ_REQ {
     uint64_t captured;
     uint32_t reserved;
 } NBG_UDP_CAP_READ_REQ, *PNBG_UDP_CAP_READ_REQ;
+
+/* ==================== surfaceflinger 组补齐 ABI ==================== */
+
+#define NBG_SF_GROUPS_ABI_VERSION 1U
+#define NBG_SF_GROUP_INPUT 0x1U
+#define NBG_SF_GROUP_INET  0x2U
+#define NBG_SF_GROUP_REQUIRED (NBG_SF_GROUP_INPUT | NBG_SF_GROUP_INET)
+
+/* 输出字段必须由调用方清零，驱动拒绝非零输入。 */
+typedef struct _NBG_SF_GROUPS_REQ {
+    uint32_t abi_version;
+    uint32_t reserved;
+    uint32_t out_present;
+    uint32_t out_added;
+    uint32_t out_group_count;
+    uint32_t out_reserved[3];
+} NBG_SF_GROUPS_REQ, *PNBG_SF_GROUPS_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;
