@@ -24,6 +24,7 @@
 #include "touch.h"
 #include "comm.h"
 #include "memory.h"
+#include "udp_capture.h"
 #include "nbg_log.h"
 #include "nbg_ksyms.h"
 #include "nbg_compat.h"
@@ -222,6 +223,7 @@ static int nbg_init(void)
 static void nbg_exit(void)
 {
     nbg_comm_exit();
+    nbg_udp_capture_exit();
     nbg_memory_exit();
     auto_unhide_all(0);
     /* cloned directory fops hold THIS_MODULE while an fd can reference them;

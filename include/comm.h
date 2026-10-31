@@ -100,6 +100,10 @@ enum OPERATIONS {
     OP_EXECUTE_PACGA    = 0x95C,
     /* 打开 system_server 受限写会话。 */
     OP_SENSOR_OPEN      = 0x95D,
+    /* UDP 旁路抓包。 */
+    OP_UDP_CAP_INIT     = 0x960,
+    OP_UDP_CAP_READ     = 0x961,
+    OP_UDP_CAP_STOP     = 0x962,
 };
 
 typedef struct _INIT_KEY {
@@ -320,6 +324,44 @@ typedef struct _NBG_SENSOR_ARM_REQ {
     _IOW('S', 1, NBG_SENSOR_ARM_REQ)
 #define NBG_SENSOR_IOC_QUERY_ACCESS \
     _IOWR('S', 2, NBG_QUERY_ACCESS_REQ)
+
+/* ==================== UDP 抓包 ABI ==================== */
+
+#define NBG_UDP_CAP_MAX_PAYLOAD 2048U
+#define NBG_UDP_CAP_READ_MAX      32U
+#define NBG_UDP_CAP_F_TRUNC     0x0001U
+
+typedef struct _NBG_UDP_PACKET {
+    uint64_t ts_ns;
+    uint64_t seq;
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint16_t payload_len;
+    uint16_t flags;
+    uint32_t sock_uid;
+    uint32_t reserved;
+    uint8_t  payload[NBG_UDP_CAP_MAX_PAYLOAD];
+} NBG_UDP_PACKET, *PNBG_UDP_PACKET;
+
+/* pid 用于取 socket UID 做过滤；min/max_payload 为 0 时用默认值。 */
+typedef struct _NBG_UDP_CAP_INIT_REQ {
+    int32_t  pid;
+    uint16_t min_payload;
+    uint16_t max_payload;
+    uint32_t reserved;
+} NBG_UDP_CAP_INIT_REQ, *PNBG_UDP_CAP_INIT_REQ;
+
+/* buf 是用户指针，指向至少 max_count 个 NBG_UDP_PACKET 的缓冲。 */
+typedef struct _NBG_UDP_CAP_READ_REQ {
+    uint64_t buf;
+    uint32_t max_count;
+    uint32_t out_count;
+    uint64_t overflow;
+    uint64_t captured;
+    uint32_t reserved;
+} NBG_UDP_CAP_READ_REQ, *PNBG_UDP_CAP_READ_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;
