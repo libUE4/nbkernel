@@ -80,9 +80,14 @@ jobs:
           make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}" 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            grep -E 'error:' /tmp/build.log | head -20 | while IFS= read -r line; do
-              echo "::error::$line"
-            done
+            {
+              echo '## 编译失败'
+              echo '```'
+              grep -nE 'error|Error|错误|fatal' /tmp/build.log | head -40
+              echo '--- 尾部 ---'
+              tail -60 /tmp/build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit "$rc"
           fi
           test -s NBG.ko
