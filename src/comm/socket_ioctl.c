@@ -1206,9 +1206,24 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         return ret;
     }
     case OP_FLUSH_ICACHE:
-    case OP_READV_MEM:
-    case OP_READV_MEM_FAULT:
         return -ENOTTY;
+    case OP_READV_MEM: {
+        READV_MEMORY req;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        return nbg_readv_memory(req.pid, (READV_ENTRY __user *)req.iovs,
+                                req.count);
+    }
+    case OP_READV_MEM_FAULT: {
+        READV_MEMORY req;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        return nbg_readv_memory_fault(req.pid,
+                                      (READV_ENTRY __user *)req.iovs,
+                                      req.count);
+    }
 
     /* 进程 / 线程 / 地址查询 */
     case OP_MODULE_BASE: {

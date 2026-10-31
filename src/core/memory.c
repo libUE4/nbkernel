@@ -925,3 +925,96 @@ long nbg_read_kernel(pid_t pid, uint64_t addr, void *buf, size_t size)
     nbg_read_ctx_release(&ctx);
     return ret;
 }
+
+/* 批量离散读取：一次取 mm，逐个 iov 走 NC 直读，逐个回写 status。
+ * 与单次读取同语义，只是省掉重复的 find_vpid / get_task_mm。 */
+static int nbg_readv_mode(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
+{
+    struct nbg_read_ctx ctx;
+    READV_ENTRY *entries;
+    uint32_t i;
+    bool need_mm = false;
+    int ret;
+
+    if (!iov || !count || count > NBG_IOV_MAX)
+        return -EINVAL;
+
+    entries = kvmalloc_array(count, sizeof(*entries), GFP_KERNEL);
+    if (!entries)
+        return -ENOMEM;
+
+    if (copy_from_user(entries, iov, count * sizeof(*entries))) {
+        kvfree(entries);
+        return -EFAULT;
+    }
+
+    for (i = 0; i < count; i++) {
+        entries[i].status = 0;
+        if (!entries[i].size)
+            continue;
+        if (!entries[i].addr || !entries[i].buffer)
+            entries[i].status = -EINVAL;
+        else if (entries[i].size > NBG_READ_MAX)
+            entries[i].status = -EMSGSIZE;
+        else if (!access_ok((void __user *)entries[i].buffer,
+                            entries[i].size))
+            entries[i].status = -EFAULT;
+        else
+            need_mm = true;
+    }
+
+    if (need_mm) {
+        ret = nbg_read_ctx_init_pid(&ctx, pid);
+        if (ret) {
+            for (i = 0; i < count; i++) {
+                if (entries[i].size && entries[i].status == 0)
+                    entries[i].status = ret;
+            }
+            goto copy_back;
+        }
+
+        for (i = 0; i < count; i++) {
+            ssize_t got;
+
+            if (!entries[i].size || entries[i].status)
+                continue;
+
+            got = nbg_nc_memrw(ctx.mm, (unsigned long)entries[i].addr,
+                               (char __user *)entries[i].buffer,
+                               entries[i].size, false);
+            if (got < 0)
+                entries[i].status = (int)got;
+            else if ((uint32_t)got != entries[i].size)
+                entries[i].status = -EFAULT;
+
+            cond_resched();
+            if (fatal_signal_pending(current)) {
+                for (i++; i < count; i++) {
+                    if (entries[i].size && entries[i].status == 0)
+                        entries[i].status = -EINTR;
+                }
+                break;
+            }
+        }
+        nbg_read_ctx_release(&ctx);
+    }
+
+copy_back:
+    if (copy_to_user(iov, entries, count * sizeof(*entries))) {
+        kvfree(entries);
+        return -EFAULT;
+    }
+    kvfree(entries);
+    return 0;
+}
+
+int nbg_readv_memory(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
+{
+    return nbg_readv_mode(pid, iov, count);
+}
+
+int nbg_readv_memory_fault(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
+{
+    /* NC 路径不解析缺页，fault 变体与普通批量读取一致。 */
+    return nbg_readv_mode(pid, iov, count);
+}

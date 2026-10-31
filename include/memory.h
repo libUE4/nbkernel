@@ -49,4 +49,9 @@ int nbg_write_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
 int nbg_write_memory_cache(pid_t pid, uintptr_t remote_addr,
                            uintptr_t user_addr, size_t size, size_t *nbytes);
 
+/* 批量离散读取，status 逐项回写。 */
+int nbg_readv_memory(pid_t pid, READV_ENTRY __user *iov, uint32_t count);
+int nbg_readv_memory_fault(pid_t pid, READV_ENTRY __user *iov,
+                           uint32_t count);
+
 #endif /* _NBG_MEMORY_H */
