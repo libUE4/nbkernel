@@ -1556,7 +1556,7 @@ static void nbg_last_client_cleanup_now(void)
     touch_up_all();
     watch_clear_all();
     shadow_del_hook(&all);      /* target_vaddr=0 => 清全部执行断点/影子 hook */
-    nbg_memory_cache_cleanup(); /* 释放旧目标进程 mm cache 引用 */
+    /* linearmap 是模块级资源，客户端断开不释放。 */
     hide_cleanup_runtime_state();
 }
 

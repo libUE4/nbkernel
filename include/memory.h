@@ -13,7 +13,7 @@
 struct mm_struct;
 
 int nbg_memory_init(void);
-void nbg_memory_cache_cleanup(void);
+/* 模块退出时释放 linearmap；客户端断开不得调用。 */
 void nbg_memory_exit(void);
 
 /* 内核 buffer 直读，免 copy_to_user */
