@@ -1274,7 +1274,10 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
             return -EFAULT;
         name[copied] = '\0';
 
-        req.pid = nbg_lookup_pid_by_comm(name);
+        /* Keep package-name matching in kernel space.  Android package names
+         * are commonly longer than TASK_COMM_LEN, so the ranked argv[0]
+         * matcher is required instead of the truncated comm-only lookup. */
+        req.pid = find_pid_by_cmdline_ranked(name);
         if (copy_to_user((void __user *)arg, &req, sizeof(req)))
             return -EFAULT;
         return req.pid > 0 ? 0 : -ESRCH;
@@ -1504,6 +1507,7 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
     case NBG_RO_THREAD:
     case NBG_RO_THREAD_FPSTATE:
     case NBG_RO_FD:
+    case NBG_RO_RANDOM:
     case NBG_RO_FILE:
         return nbg_readonly_ioctl(cmd, arg);
     case NBG_RO_INPUT_SUBSCRIBE:

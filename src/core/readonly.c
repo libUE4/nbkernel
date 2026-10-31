@@ -12,6 +12,7 @@
 #include <linux/mm_inline.h>
 #include <linux/pid.h>
 #include <linux/ptrace.h>
+#include <linux/random.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
@@ -70,6 +71,26 @@ static int ro_symbols(void)
     result = ro_access && ro_syscall && ro_fget ? 0 : -EOPNOTSUPP;
     mutex_unlock(&ro_symbols_lock);
     return result;
+}
+
+static long ro_random_ioctl(unsigned long argument)
+{
+    struct NbgRoRandom req;
+    u8 bytes[64];
+
+    if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
+        return -EFAULT;
+    if (req.abi != NBG_RO_ABI || req.size == 0 || req.size > sizeof(bytes) ||
+        req.buffer == 0)
+        return -EINVAL;
+
+    get_random_bytes(bytes, req.size);
+    if (copy_to_user((void __user *)(unsigned long)req.buffer, bytes, req.size))
+        return -EFAULT;
+    req.result = req.size;
+    if (copy_to_user((void __user *)argument, &req, sizeof(req)))
+        return -EFAULT;
+    return 0;
 }
 
 /* Hold exec_update_lock through each query, including the access check.
@@ -445,6 +466,7 @@ long nbg_readonly_ioctl(unsigned int command, unsigned long argument)
     case NBG_RO_THREAD: return ro_thread_ioctl(argument);
     case NBG_RO_THREAD_FPSTATE: return ro_thread_fpstate_ioctl(argument);
     case NBG_RO_FD: return ro_fd_ioctl(argument);
+    case NBG_RO_RANDOM: return ro_random_ioctl(argument);
     case NBG_RO_FILE: return ro_file_ioctl(argument);
     default: return -ENOTTY;
     }

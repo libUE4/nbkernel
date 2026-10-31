@@ -13,3 +13,24 @@ LOCAL_SRC_FILES := ../query_probe.c
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/../.. $(LOCAL_PATH)/../../include
 LOCAL_CFLAGS := -O2 -include $(LOCAL_PATH)/../../secret.h
 include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := sensor_probe
+LOCAL_SRC_FILES := ../sensor_probe.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/../.. $(LOCAL_PATH)/../../include
+LOCAL_CFLAGS := -O2 -include $(LOCAL_PATH)/../../secret.h
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := udp_probe
+LOCAL_SRC_FILES := ../udp_probe.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/../.. $(LOCAL_PATH)/../../include
+LOCAL_CFLAGS := -O2 -include $(LOCAL_PATH)/../../secret.h
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := dfm_udp
+LOCAL_SRC_FILES := ../dfm_udp.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/../.. $(LOCAL_PATH)/../../include
+LOCAL_CFLAGS := -O2 -include $(LOCAL_PATH)/../../secret.h
+include $(BUILD_EXECUTABLE)

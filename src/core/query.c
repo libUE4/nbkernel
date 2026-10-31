@@ -72,27 +72,6 @@ static struct sighand_struct *nbg_lock_sighand(struct task_struct *task,
 
 /* ---- 进程枚举 ---- */
 
-/* 内核侧入口：不经用户指针，供旧命令转发调用。 */
-pid_t nbg_lookup_pid_by_comm(const char *name)
-{
-    struct task_struct *task;
-    pid_t found = -1;
-
-    if (!name || !name[0])
-        return -1;
-
-    rcu_read_lock();
-    for_each_process(task) {
-        if (strncmp(task->comm, name, TASK_COMM_LEN) == 0) {
-            found = task->pid;
-            break;
-        }
-    }
-    rcu_read_unlock();
-
-    return found;
-}
-
 long nbg_query_pid(void __user *arg)
 {
     NBG_GET_PID_REQ req;
