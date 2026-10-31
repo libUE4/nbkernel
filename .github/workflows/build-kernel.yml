@@ -75,12 +75,20 @@ jobs:
           persist-credentials: false
 
       - name: Build kernel module
+        id: build
         run: |
-          set -uo pipefail
-          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}" 2>&1 | tee /tmp/build.log
-          rc=${PIPESTATUS[0]}
+          set +e
+          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" NBG_DEBUG="${NBG_DEBUG}" > /tmp/build.log 2>&1
+          rc=$?
+          cat /tmp/build.log
           if [ "$rc" -ne 0 ]; then
-            cp /tmp/build.log build-errors.txt
+            {
+              echo '### 编译错误'
+              echo '```'
+              grep -nE 'error:' /tmp/build.log | head -30
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "failed=1" >> "$GITHUB_OUTPUT"
             exit "$rc"
           fi
           test -s NBG.ko
