@@ -771,3 +771,99 @@ int nbg_write_memory_cache(pid_t pid, uintptr_t remote_addr,
     return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, true,
                          true);
 }
+
+/* ---- 可复用的 mm 上下文 ---- */
+
+int nbg_read_ctx_init_pid(struct nbg_read_ctx *ctx, pid_t pid)
+{
+    struct task_struct *task;
+    struct mm_struct *mm;
+
+    if (!ctx || pid <= 0)
+        return -EINVAL;
+
+    ctx->pid = 0;
+    ctx->mm = NULL;
+
+    rcu_read_lock();
+    task = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if (task)
+        get_task_struct(task);
+    rcu_read_unlock();
+    if (!task)
+        return -ESRCH;
+
+    mm = get_task_mm(task);
+    put_task_struct(task);
+    if (!mm)
+        return -EINVAL;
+
+    ctx->pid = pid;
+    ctx->mm = mm;
+    return 0;
+}
+
+int nbg_read_ctx_init_current(struct nbg_read_ctx *ctx, pid_t expected_tgid)
+{
+    struct mm_struct *mm;
+
+    if (!ctx || expected_tgid <= 0)
+        return -EINVAL;
+
+    ctx->pid = 0;
+    ctx->mm = NULL;
+
+    if (current->tgid != expected_tgid)
+        return -ESRCH;
+
+    mm = get_task_mm(current);
+    if (!mm)
+        return -EINVAL;
+
+    ctx->pid = expected_tgid;
+    ctx->mm = mm;
+    return 0;
+}
+
+long nbg_read_ctx_read(struct nbg_read_ctx *ctx, uint64_t addr, void *buf,
+                       size_t size)
+{
+    ssize_t ret;
+
+    if (!ctx || !ctx->mm || !buf)
+        return -EINVAL;
+    if (size == 0 || size > NBG_READ_MAX)
+        return -EINVAL;
+
+    ret = nbg_nc_read(ctx->mm, (unsigned long)addr, buf, size);
+    if (ret < 0)
+        return ret;
+    if ((uint64_t)ret != size)
+        return -EFAULT;
+
+    return 0;
+}
+
+void nbg_read_ctx_release(struct nbg_read_ctx *ctx)
+{
+    if (!ctx)
+        return;
+    if (ctx->mm)
+        mmput(ctx->mm);
+    ctx->pid = 0;
+    ctx->mm = NULL;
+}
+
+long nbg_read_kernel(pid_t pid, uint64_t addr, void *buf, size_t size)
+{
+    struct nbg_read_ctx ctx;
+    long ret;
+
+    ret = nbg_read_ctx_init_pid(&ctx, pid);
+    if (ret)
+        return ret;
+
+    ret = nbg_read_ctx_read(&ctx, addr, buf, size);
+    nbg_read_ctx_release(&ctx);
+    return ret;
+}
