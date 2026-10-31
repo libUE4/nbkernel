@@ -79,20 +79,22 @@ static struct nbg_udp_packet *g_udp_read_slots[NBG_UDP_CAP_READ_MAX];
 static struct nbg_udp_packet *g_udp_stage;
 static DEFINE_PER_CPU(struct nbg_udp_packet *, g_udp_scratch);
 
-static uid_t nbg_udp_uid_from_pid(pid_t pid)
+/* 返回 0 表示成功，-ESRCH 表示找不到进程。
+ * 不能用 uid==0 判定失败：root 进程的 uid 本来就是 0。 */
+static int nbg_udp_uid_from_pid(pid_t pid, uid_t *out_uid)
 {
     struct task_struct *task;
-    uid_t uid = 0;
 
-    if (pid <= 0)
-        return 0;
+    if (!out_uid || pid <= 0)
+        return -EINVAL;
 
     rcu_read_lock();
     task = pid_task(find_vpid(pid), PIDTYPE_PID);
     if (task)
-        uid = from_kuid(&init_user_ns, task_uid(task));
+        *out_uid = from_kuid(&init_user_ns, task_uid(task));
     rcu_read_unlock();
-    return uid;
+
+    return task ? 0 : -ESRCH;
 }
 
 static bool nbg_udp_sock_uid_ok(const struct sock *sk)
@@ -290,9 +292,9 @@ long nbg_udp_capture_init(void __user *arg)
     if (req.max_payload && req.max_payload > NBG_UDP_CAP_MAX_PAYLOAD)
         return -EINVAL;
 
-    uid = nbg_udp_uid_from_pid(req.pid);
-    if (!uid)
-        return -ESRCH;
+    ret = nbg_udp_uid_from_pid(req.pid, &uid);
+    if (ret)
+        return ret;
 
     mutex_lock(&g_udp_init_lock);
 
