@@ -25,6 +25,7 @@
 #include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/user_namespace.h>
 #include <linux/workqueue.h>
 
@@ -96,10 +97,22 @@ static bool nbg_user_ns_is_init(const struct cred *cred)
     return cred->user_ns == init_ns;
 }
 
-/* 与内核 put_cred 等价，但不内联展开到未导出的 __put_cred。 */
+/* 与内核 put_cred 等价，但不内联展开到未导出的 __put_cred。
+ * cred->usage 在 6.2 才改成 atomic_long_t，旧内核仍是 atomic_t。 */
 static void nbg_put_cred_safe(struct cred *cred)
 {
+    bool drop;
+
     if (!cred)
+        return;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+    drop = atomic_long_dec_and_test(&cred->usage);
+#else
+    drop = atomic_dec_and_test(&cred->usage);
+#endif
+
+    if (!drop)
         return;
 
     if (!nbg_put_cred_fn) {
@@ -107,8 +120,7 @@ static void nbg_put_cred_safe(struct cred *cred)
         return;
     }
 
-    if (atomic_long_dec_and_test(&cred->usage))
-        nbg_put_cred_fn(cred);
+    nbg_put_cred_fn(cred);
 }
 
 /* ---- 调用方身份 ---- */

@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/init_task.h>
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
@@ -58,10 +59,22 @@ static void nbg_file_resolve_symbols(void)
             generic_kallsyms_lookup_name("__put_cred");
 }
 
-/* 与内核 put_cred 等价，但不内联展开到未导出的 __put_cred。 */
+/* 与内核 put_cred 等价，但不内联展开到未导出的 __put_cred。
+ * cred->usage 在 6.2 才改成 atomic_long_t，旧内核仍是 atomic_t。 */
 static void nbg_file_put_cred(struct cred *cred)
 {
+    bool drop;
+
     if (!cred)
+        return;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+    drop = atomic_long_dec_and_test(&cred->usage);
+#else
+    drop = atomic_dec_and_test(&cred->usage);
+#endif
+
+    if (!drop)
         return;
 
     if (!nbg_put_cred_fn) {
@@ -69,8 +82,7 @@ static void nbg_file_put_cred(struct cred *cred)
         return;
     }
 
-    if (atomic_long_dec_and_test(&cred->usage))
-        nbg_put_cred_fn(cred);
+    nbg_put_cred_fn(cred);
 }
 
 static struct cred *g_file_cred;
