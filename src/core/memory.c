@@ -10,6 +10,7 @@
 #include "memory.h"
 
 #include <linux/highmem.h>
+#include <linux/hardirq.h>
 #include <linux/io.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
@@ -19,6 +20,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+#include <linux/version.h>
 
 #include <asm/cacheflush.h>
 #include <asm/memory.h>
@@ -511,6 +513,56 @@ static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
     return copied;
 }
 
+/* GUP faults in each requested page and returns a short-lived page reference.
+ * mmap_lock keeps the target VMA stable; the page reference prevents reclaim
+ * or migration from recycling it before the bytes have been copied. */
+static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
+                             void *buffer, size_t size, size_t *nbytes)
+{
+    size_t copied = 0;
+    u8 *output = buffer;
+    int ret = 0;
+
+    if (nbytes) *nbytes = 0;
+    if (!mm || !buffer || !size)
+        return -EINVAL;
+
+    compat_mmap_read_lock(mm);
+    while (copied < size) {
+        struct page *page = NULL;
+        unsigned int flags = 0;
+        unsigned long current_addr = addr + copied;
+        size_t offset = offset_in_page(current_addr);
+        size_t bytes = min_t(size_t, size - copied, PAGE_SIZE - offset);
+        void *mapped;
+
+        /* A NULL locked argument keeps GUP from dropping mmap_lock while the
+         * caller continues to use the mm and its VMA. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+        ret = get_user_pages_remote(mm, current_addr, 1, flags, &page, NULL);
+#else
+        ret = get_user_pages_remote(mm, current_addr, 1, flags, &page,
+                                    NULL, NULL);
+#endif
+        if (ret != 1) {
+            if (ret >= 0) ret = -EFAULT;
+            break;
+        }
+
+        mapped = compat_kmap_page(page);
+        memcpy(output + copied, (u8 *)mapped + offset, bytes);
+        compat_kunmap_page(mapped);
+        put_page(page);
+        copied += bytes;
+        ret = 0;
+        if (!(copied & ((16U * PAGE_SIZE) - 1U)))
+            cond_resched();
+    }
+    compat_mmap_read_unlock(mm);
+    if (nbytes) *nbytes = copied;
+    return copied == size ? 0 : (ret ? ret : -EFAULT);
+}
+
 /* Cache-maintenance variant: invalidate the cacheable alias before the copy. */
 static ssize_t nbg_nc_memrw_cached(struct mm_struct *mm, unsigned long addr,
                                    char __user *buf, size_t count, int write)
@@ -797,6 +849,42 @@ int nbg_read_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
 {
     return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, false,
                          false);
+}
+
+int nbg_read_memory_fault(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
+                          size_t size, size_t *nbytes)
+{
+    struct task_struct *task = NULL;
+    struct mm_struct *mm;
+    void *buffer;
+    size_t copied = 0;
+    int ret;
+
+    if (nbytes) *nbytes = 0;
+    if (pid <= 0 || !remote_addr || !user_addr || !size ||
+        size > NBG_MAX_RW_SIZE || remote_addr + size < remote_addr)
+        return -EINVAL;
+    if (in_atomic() || irqs_disabled())
+        return -EBUSY;
+    buffer = kvmalloc(size, GFP_KERNEL);
+    if (!buffer)
+        return -ENOMEM;
+    mm = nbg_get_mm(pid, &task);
+    if (!mm) {
+        kvfree(buffer);
+        return -ESRCH;
+    }
+    ret = nbg_fault_read_mm(mm, (unsigned long)remote_addr, buffer, size,
+                            &copied);
+    mmput(mm);
+    if (task) put_task_struct(task);
+    if (!ret && copy_to_user((void __user *)user_addr, buffer, size)) {
+        ret = -EFAULT;
+        copied = 0;
+    }
+    kvfree(buffer);
+    if (nbytes) *nbytes = copied;
+    return ret;
 }
 
 /* Cache-maintenance read: invalidate the cacheable alias before copying from

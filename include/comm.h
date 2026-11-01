@@ -59,6 +59,10 @@ enum OPERATIONS {
     OP_TOUCH_SLOT_UP   = 0x928,
     OP_SET_TOUCH_SLOTS = 0x929,
     OP_SHADOW_DIAG     = 0x92A,
+    /* Read through the kernel fault-in path, then copy the now-resident
+     * pages.  This is intentionally separate from OP_READ_MEM so callers
+     * can keep present-only snapshots on their hot path. */
+    OP_READ_MEM_FAULT = 0x92F,
     OP_DEVPTS_FILTER  = 0x930,
     OP_THREAD_ENV     = 0x932,
     OP_TARGET_THREAD_IOCTL_SESSION = 0x934,

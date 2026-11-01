@@ -1179,6 +1179,17 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
                               req.size, &nbytes);
         return ret;
     }
+    case OP_READ_MEM_FAULT: {
+        COPY_MEMORY req;
+        size_t nbytes = 0;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        ret = nbg_read_memory_fault(req.pid, req.addr,
+                                    (uintptr_t)req.buffer, req.size,
+                                    &nbytes);
+        return ret;
+    }
     case OP_READ_MEM_CACHE: {
         COPY_MEMORY req;
         size_t nbytes = 0;
