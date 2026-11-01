@@ -87,31 +87,39 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf initramfs
-          mkdir -p initramfs/bin initramfs/proc initramfs/sys initramfs/dev
+          mkdir -p initramfs/bin initramfs/etc initramfs/proc initramfs/sys initramfs/dev
           cp /bin/busybox initramfs/bin/busybox
+          ln -sf busybox initramfs/bin/sh
+          # /init 直接是 busybox 二进制：这套内核 exec 带 shebang 的脚本会返回 ENOEXEC，
+          # argv[0] 为 init 时 busybox 会以自己的 init applet 启动。
+          cp /bin/busybox initramfs/init
           cp NBG.ko initramfs/NBG.ko
-          cat > initramfs/init <<'INIT'
-          #!/bin/busybox sh
-          /bin/busybox mount -t proc proc /proc
-          /bin/busybox mount -t sysfs sys /sys
-          /bin/busybox mount -t devtmpfs dev /dev 2>/dev/null || true
+          mknod -m 622 initramfs/dev/console c 5 1 || true
+          mknod -m 666 initramfs/dev/null c 1 3 || true
 
-          echo "GUEST_KERNEL=$(/bin/busybox uname -r)"
+          cat > initramfs/etc/inittab <<'TAB'
+          ::sysinit:/bin/sh /test.sh
+          TAB
 
-          if /bin/busybox insmod /NBG.ko; then
+          cat > initramfs/test.sh <<'SH'
+          BUSY=/bin/busybox
+          $BUSY mount -t proc proc /proc
+          $BUSY mount -t sysfs sys /sys
+          echo "GUEST_KERNEL=$($BUSY uname -r)"
+          if $BUSY insmod /NBG.ko; then
             echo "INIT_MODULE_OK"
           else
             echo "INIT_MODULE_FAIL rc=$?"
           fi
-
           echo '--- /proc/modules ---'
-          /bin/busybox cat /proc/modules
+          $BUSY cat /proc/modules
           echo '--- dmesg tail ---'
-          /bin/busybox dmesg | /bin/busybox tail -n 80
+          $BUSY dmesg | $BUSY tail -n 80
           echo '--- guest done ---'
-          /bin/busybox poweroff -f
-          INIT
-          chmod +x initramfs/init
+          $BUSY poweroff -f
+          SH
+
+          chmod +x initramfs/init initramfs/bin/busybox initramfs/test.sh
           ( cd initramfs && find . -print | /bin/busybox cpio -o -H newc --quiet ) > initrd.cpio
           gzip -9 -f initrd.cpio
           ls -la initrd.cpio.gz
