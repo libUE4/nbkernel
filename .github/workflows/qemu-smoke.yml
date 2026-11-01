@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       kmi:
-        description: '要启动的 KMI（矩阵中的单个值）'
+        description: '要启动的 KMI：all 或矩阵中的单个值'
         required: false
-        default: android15-6.6
+        default: all
         type: string
 
 permissions:
@@ -19,18 +19,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Resolve smoke matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve matrix from inputs
+        id: resolve
+        run: |
+          set -euo pipefail
+          all='["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12","android17-6.18"]'
+          kmi='${{ inputs.kmi }}'
+          if [ -z "$kmi" ] || [ "$kmi" = "all" ]; then
+            echo "matrix={\"kmi\":$all}" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$all" | grep -qx ".*\"$kmi\".*"; then
+            echo "matrix={\"kmi\":[\"$kmi\"]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "未知 KMI: $kmi" >&2
+            exit 1
+          fi
+          cat "$GITHUB_OUTPUT"
+
   smoke:
-    name: Boot ${{ inputs.kmi }} and load NBG.ko
+    name: Boot ${{ matrix.kmi }} and load NBG.ko
+    needs: [prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     container:
-      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-20260828
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20260828
       options: --privileged
     defaults:
       run:
         shell: bash
     env:
-      KMI: ${{ inputs.kmi }}
+      KMI: ${{ matrix.kmi }}
 
     steps:
       - name: Checkout source code
@@ -44,15 +71,11 @@ jobs:
           make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}"
           test -s NBG.ko
           echo "KO size=$(stat -c %s NBG.ko) bytes"
-          ls -la NBG.ko
 
       - name: Locate bootable kernel
         run: |
           set -euo pipefail
           echo "KERNEL_SRC=${KERNEL_SRC}"
-          ls -la "${KERNEL_SRC}" | head -n 40
-          echo '--- arch/arm64/boot ---'
-          ls -la "${KERNEL_SRC}/arch/arm64/boot/" 2>/dev/null | head -n 20 || true
           echo '--- candidate images ---'
           find "${KERNEL_SRC}" -maxdepth 3 \( -name 'Image*' -o -name 'vmlinux*' \) -printf '%s %p\n' 2>/dev/null | sort -rn | head -n 10 || true
 
@@ -95,7 +118,6 @@ jobs:
                 -static -fno-pic -no-pie -fno-stack-protector -fno-builtin \
                 -Wl,-e,_start -Wl,--build-id=none \
                 -o initramfs/init test/qemu_init.c
-          file initramfs/init || true
           ( cd initramfs && find . -print | /bin/busybox cpio -o -H newc --quiet ) > initrd.cpio
           gzip -9 -f initrd.cpio
           ls -la initrd.cpio.gz initramfs/init
@@ -112,10 +134,10 @@ jobs:
           rc=$?
           set -e
           echo "qemu_exit=$rc"
-          tail -n 60 qemu.log
+          tail -n 40 qemu.log
 
           if grep -q 'INIT_MODULE_OK' qemu.log; then
-            echo 'SMOKE_RESULT=module_loaded'
+            echo "SMOKE_RESULT=module_loaded kernel=$(grep -m1 'Linux version' qemu.log || true)"
           else
             echo 'SMOKE_RESULT=module_load_failed' >&2
             exit 1
@@ -125,7 +147,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-smoke-${{ inputs.kmi }}
+          name: qemu-smoke-${{ matrix.kmi }}
           path: qemu.log
           if-no-files-found: warn
           retention-days: 14
