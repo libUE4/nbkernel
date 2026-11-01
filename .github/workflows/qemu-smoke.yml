@@ -72,6 +72,25 @@ jobs:
           test -s NBG.ko
           echo "KO size=$(stat -c %s NBG.ko) bytes"
 
+      - name: Dump kernel ABI
+        run: |
+          set -euo pipefail
+          {
+            echo "KMI=${KMI}"
+            echo "KERNEL_SRC=${KERNEL_SRC}"
+            echo '--- CFI config ---'
+            grep -E '^CONFIG_CFI_CLANG|^CONFIG_LTO_CLANG' "${KERNEL_SRC}/.config" 2>/dev/null || echo '(no .config)'
+            echo '--- vmalloc.h declarations ---'
+            grep -n 'get_vm_area_caller\|free_vm_area' "${KERNEL_SRC}/include/linux/vmalloc.h" 2>/dev/null || echo '(not found)'
+            echo '--- mm.h apply_to_page_range ---'
+            grep -n 'apply_to_page_range' "${KERNEL_SRC}/include/linux/mm.h" 2>/dev/null || echo '(not found)'
+            echo '--- mm/vmalloc.c definitions ---'
+            grep -n -B2 -A6 'get_vm_area_caller(unsigned long' "${KERNEL_SRC}/mm/vmalloc.c" 2>/dev/null || echo '(not found)'
+            echo '--- mm/memory.c apply_to_page_range ---'
+            grep -n -A6 'int apply_to_page_range(struct mm_struct' "${KERNEL_SRC}/mm/memory.c" 2>/dev/null || echo '(not found)'
+          } > kernel_api.txt
+          cat kernel_api.txt
+
       - name: Locate bootable kernel
         run: |
           set -euo pipefail
@@ -148,6 +167,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qemu-smoke-${{ matrix.kmi }}
-          path: qemu.log
+          path: |
+            qemu.log
+            kernel_api.txt
           if-no-files-found: warn
           retention-days: 14
