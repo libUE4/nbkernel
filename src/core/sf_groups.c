@@ -8,6 +8,7 @@
  * 修改别的任务的 cred 指针。
  */
 #include "sf_groups.h"
+#include "nbg_user_ns.h"
 
 #include <linux/cred.h>
 #include <linux/dcache.h>
@@ -40,12 +41,30 @@ typedef struct group_info *(*nbg_groups_alloc_t)(int);
 typedef void (*nbg_groups_sort_t)(struct group_info *);
 typedef int (*nbg_groups_search_t)(const struct group_info *, kgid_t);
 typedef int (*nbg_set_current_groups_t)(struct group_info *);
+/* put_group_info 会内联展开到未导出的 groups_free，直接引用会让模块加载失败。 */
+typedef void (*nbg_groups_free_t)(struct group_info *);
+
+static void nbg_put_group_info_safe(struct group_info *groups)
+{
+    nbg_groups_free_t free_fn;
+
+    if (!groups)
+        return;
+
+    free_fn = (nbg_groups_free_t)generic_kallsyms_lookup_name("groups_free");
+    if (!free_fn)
+        /* 取不到释放函数时宁可泄一次内核小对象，也不要在加载期多一个未定义符号。 */
+        return;
+
+    if (atomic_dec_and_test(&groups->usage))
+        free_fn(groups);
+}
 
 static bool nbg_sf_has_system_uids(const struct cred *cred)
 {
     kuid_t system_uid = KUIDT_INIT(NBG_AID_SYSTEM);
 
-    return cred->user_ns == &init_user_ns &&
+    return cred->user_ns == nbg_init_user_ns_addr() &&
            uid_eq(cred->uid, system_uid) &&
            uid_eq(cred->euid, system_uid) &&
            uid_eq(cred->suid, system_uid) &&
@@ -170,7 +189,7 @@ static int nbg_sf_append_groups(uint32_t missing)
     /* set_current_groups() 内部走 prepare_creds/commit_creds，
      * 不像 setgroups 系统调用那样要求 CAP_SETGID。 */
     ret = set_groups(new_groups);
-    put_group_info(new_groups);
+    nbg_put_group_info_safe(new_groups);
     return ret;
 }
 

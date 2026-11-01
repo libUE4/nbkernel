@@ -7,6 +7,7 @@
  * fd 关闭时（含 SIGKILL）在 work 里把 delta 清零、GOT 恢复原值。
  */
 #include "sensor_mem.h"
+#include "nbg_user_ns.h"
 
 #include <linux/anon_inodes.h>
 #include <linux/cred.h>
@@ -58,9 +59,14 @@ static struct nbg_sensor_session *g_active;
 /* 这两个符号在部分 GKI 分支不导出，走 kallsyms 解析。 */
 typedef struct file *(*nbg_get_task_exe_file_t)(struct task_struct *);
 typedef void (*nbg_sync_icache_dcache_t)(pte_t);
+/* 凭据与命名空间同样存在导出差异：不导出时直接引用会让模块加载失败。 */
+typedef const struct cred *(*nbg_get_task_cred_t)(struct task_struct *);
+typedef void (*nbg_put_cred_t)(struct cred *);
 
 static nbg_get_task_exe_file_t nbg_get_task_exe_file;
 static nbg_sync_icache_dcache_t nbg_sync_icache_dcache;
+static nbg_get_task_cred_t nbg_get_task_cred_fn;
+static nbg_put_cred_t nbg_put_cred_fn;
 
 static void nbg_sensor_resolve_symbols(void)
 {
@@ -70,6 +76,39 @@ static void nbg_sensor_resolve_symbols(void)
     if (!nbg_sync_icache_dcache)
         nbg_sync_icache_dcache = (nbg_sync_icache_dcache_t)
             generic_kallsyms_lookup_name("sync_icache_dcache");
+    if (!nbg_get_task_cred_fn)
+        nbg_get_task_cred_fn = (nbg_get_task_cred_t)
+            generic_kallsyms_lookup_name("get_task_cred");
+    if (!nbg_put_cred_fn)
+        nbg_put_cred_fn = (nbg_put_cred_t)
+            generic_kallsyms_lookup_name("__put_cred");
+}
+
+/* init_user_ns 取不到时退化为只看 uid：宁可放过命名空间判断，
+ * 也不能因为符号缺失让整个准入流程失效。 */
+static bool nbg_user_ns_is_init(const struct cred *cred)
+{
+    struct user_namespace *init_ns = nbg_init_user_ns_addr();
+
+    if (!init_ns)
+        return true;
+
+    return cred->user_ns == init_ns;
+}
+
+/* 与内核 put_cred 等价，但不内联展开到未导出的 __put_cred。 */
+static void nbg_put_cred_safe(struct cred *cred)
+{
+    if (!cred)
+        return;
+
+    if (!nbg_put_cred_fn) {
+        kfree(cred);
+        return;
+    }
+
+    if (atomic_long_dec_and_test(&cred->usage))
+        nbg_put_cred_fn(cred);
 }
 
 /* ---- 调用方身份 ---- */
@@ -78,7 +117,7 @@ static bool nbg_caller_is_root(void)
 {
     const struct cred *cred = current_cred();
 
-    return cred->user_ns == &init_user_ns &&
+    return nbg_user_ns_is_init(cred) &&
            uid_eq(cred->uid, GLOBAL_ROOT_UID) &&
            uid_eq(cred->euid, GLOBAL_ROOT_UID);
 }
@@ -93,7 +132,7 @@ static bool nbg_caller_is_surfaceflinger(void)
     char *path;
     bool allowed = false;
 
-    if (cred->user_ns != &init_user_ns ||
+    if (!nbg_user_ns_is_init(cred) ||
         !uid_eq(cred->uid, KUIDT_INIT(1000)) ||
         !uid_eq(cred->euid, KUIDT_INIT(1000)) ||
         !uid_eq(cred->suid, KUIDT_INIT(1000)) ||
@@ -571,13 +610,24 @@ long nbg_sensor_open(void __user *arg)
 
     /* 只接受 system_server 组长线程，uid/euid 均为 system(1000)。 */
     get_task_comm(comm, session->target);
-    cred = get_task_cred(session->target);
+    if (!nbg_get_task_cred_fn) {
+        /* 取不到 get_task_cred 就无法做身份核验，宁可直接拒绝。 */
+        ret = -EACCES;
+        goto fail;
+    }
+
+    cred = nbg_get_task_cred_fn(session->target);
+    if (!cred) {
+        ret = -EACCES;
+        goto fail;
+    }
+
     ret = strcmp(comm, "system_server") ||
           !thread_group_leader(session->target) ||
-          cred->user_ns != &init_user_ns ||
+          !nbg_user_ns_is_init(cred) ||
           !uid_eq(cred->uid, KUIDT_INIT(1000)) ||
           !uid_eq(cred->euid, KUIDT_INIT(1000)) ? -EACCES : 0;
-    put_cred(cred);
+    nbg_put_cred_safe((struct cred *)cred);
     if (ret)
         goto fail;
 

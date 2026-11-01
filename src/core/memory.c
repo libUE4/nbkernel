@@ -8,6 +8,7 @@
  * 一次页表遍历定位物理地址，加一次线性偏移。
  */
 #include "memory.h"
+#include "nbg_alloc.h"
 
 #include <linux/highmem.h>
 #include <linux/hardirq.h>
@@ -158,7 +159,11 @@ static void *nbg_phys_map(unsigned long phys, size_t size, pgprot_t prot)
         if (!pfns)
             return NULL;
     } else {
-        pfns = vmalloc_array(count, sizeof(*pfns));
+        /* vmalloc_array 在 5.10 与 6.12 上分别是未知符号 / vmalloc_array_noprof，
+         * 直接引用会让模块在真机上加载失败；vmalloc 各版本都导出。 */
+        if (count > SIZE_MAX / sizeof(*pfns))
+            return NULL;
+        pfns = vmalloc(count * sizeof(*pfns));
         if (!pfns)
             return NULL;
         use_vmalloc = true;
@@ -460,6 +465,8 @@ static void nbg_dcache_invalidate(unsigned long phys, size_t len)
 
 /* Read/write through the non-cacheable linearmap. Mirrors enkernel's
  * nc_memrw: one walker, one copy, direction chosen by `write`. */
+/* kvmalloc_array / vmalloc_array 在 6.10+ 会展开成 *_noprof 符号，而设备
+ * 内核只导出旧名字；统一走 nbg_alloc.h 的版本适配层。 */
 static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
                             char __user *buf, size_t count, int write)
 {
@@ -866,7 +873,7 @@ int nbg_read_memory_fault(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
         return -EINVAL;
     if (in_atomic() || irqs_disabled())
         return -EBUSY;
-    buffer = kvmalloc(size, GFP_KERNEL);
+    buffer = nbg_kvmalloc(size, GFP_KERNEL);
     if (!buffer)
         return -ENOMEM;
     mm = nbg_get_mm(pid, &task);
@@ -1019,7 +1026,7 @@ static int nbg_readv_mode(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
     if (!iov || !count || count > NBG_IOV_MAX)
         return -EINVAL;
 
-    entries = kvmalloc_array(count, sizeof(*entries), GFP_KERNEL);
+    entries = nbg_kvmalloc_array(count, sizeof(*entries), GFP_KERNEL);
     if (!entries)
         return -ENOMEM;
 

@@ -285,7 +285,7 @@ static long ro_maps_ioctl(unsigned long argument)
     task = ro_task(req.pid, req.pid); if (IS_ERR(task)) return PTR_ERR(task);
     req.process_start_ns = READ_ONCE(task->start_boottime); req.length = 0;
     mm = get_task_mm(task); if (!mm) { result = -ESRCH; goto put_task; }
-    out.bytes = kvmalloc(req.capacity, GFP_KERNEL); out.capacity = req.capacity;
+    out.bytes = nbg_kvmalloc(req.capacity, GFP_KERNEL); out.capacity = req.capacity;
     out.path = nbg_kmalloc(PATH_MAX, GFP_KERNEL);
     out.line = nbg_kmalloc(PATH_MAX + 256, GFP_KERNEL);
     if (!out.bytes || !out.path || !out.line) { result = -ENOMEM; goto free_output; }

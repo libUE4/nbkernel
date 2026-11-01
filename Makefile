@@ -11,6 +11,7 @@ $(MODULE_NAME)-objs := \
 	src/core/gki_compat.o \
 	src/core/memory.o \
 	src/core/nbg_log.o \
+	src/core/nbg_user_ns.o \
 	src/core/process.o \
 	src/core/query.o \
 	src/core/udp_capture.o \

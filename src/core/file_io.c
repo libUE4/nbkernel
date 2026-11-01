@@ -40,6 +40,38 @@ typedef ssize_t (*nbg_kernel_write_t)(struct file *, const void *, size_t,
 typedef const struct cred *(*nbg_override_creds_t)(const struct cred *);
 typedef void (*nbg_revert_creds_t)(const struct cred *);
 typedef int (*nbg_set_secctx_t)(struct cred *, const char *);
+/* prepare_kernel_cred / __put_cred 在部分 GKI 内核不导出，直接引用会让
+ * 模块加载时报 Unknown symbol，因此统一走 kallsyms 解析。 */
+typedef struct cred *(*nbg_prepare_kernel_cred_t)(struct task_struct *);
+typedef void (*nbg_put_cred_t)(struct cred *);
+
+static nbg_prepare_kernel_cred_t nbg_prepare_kernel_cred_fn;
+static nbg_put_cred_t nbg_put_cred_fn;
+
+static void nbg_file_resolve_symbols(void)
+{
+    if (!nbg_prepare_kernel_cred_fn)
+        nbg_prepare_kernel_cred_fn = (nbg_prepare_kernel_cred_t)
+            generic_kallsyms_lookup_name("prepare_kernel_cred");
+    if (!nbg_put_cred_fn)
+        nbg_put_cred_fn = (nbg_put_cred_t)
+            generic_kallsyms_lookup_name("__put_cred");
+}
+
+/* 与内核 put_cred 等价，但不内联展开到未导出的 __put_cred。 */
+static void nbg_file_put_cred(struct cred *cred)
+{
+    if (!cred)
+        return;
+
+    if (!nbg_put_cred_fn) {
+        kfree(cred);
+        return;
+    }
+
+    if (atomic_long_dec_and_test(&cred->usage))
+        nbg_put_cred_fn(cred);
+}
 
 static struct cred *g_file_cred;
 static DEFINE_MUTEX(g_file_io_lock);
@@ -356,7 +388,11 @@ int nbg_file_io_init(void)
     struct cred *cred;
     int ret;
 
-    cred = prepare_kernel_cred(&init_task);
+    nbg_file_resolve_symbols();
+    if (!nbg_prepare_kernel_cred_fn)
+        return -ENOENT;
+
+    cred = nbg_prepare_kernel_cred_fn(&init_task);
     if (!cred)
         return -ENOMEM;
 
@@ -364,7 +400,7 @@ int nbg_file_io_init(void)
         generic_kallsyms_lookup_name("set_security_override_from_ctx");
     if (!set_ctx) {
         /* 拿不到 SELinux 覆盖能力时不要假装成功：后续打开会被拒。 */
-        put_cred(cred);
+        nbg_file_put_cred(cred);
         return -ENOENT;
     }
 
@@ -381,7 +417,7 @@ int nbg_file_io_init(void)
     }
     if (ret) {
         pr_err("nbg: file io selinux ctx %s failed: %d\n", secctx, ret);
-        put_cred(cred);
+        nbg_file_put_cred(cred);
         return ret;
     }
 
@@ -393,7 +429,7 @@ int nbg_file_io_init(void)
 void nbg_file_io_exit(void)
 {
     if (g_file_cred) {
-        put_cred(g_file_cred);
+        nbg_file_put_cred(g_file_cred);
         g_file_cred = NULL;
     }
 }
