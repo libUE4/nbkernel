@@ -17,12 +17,14 @@
 #include <linux/fs.h>
 #include <linux/limits.h>
 #include <linux/mm.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/uidgid.h>
 #include <linux/user_namespace.h>
+#include <linux/version.h>
 
 #include "comm.h"
 #include "nbg_compat.h"
@@ -44,6 +46,16 @@ typedef int (*nbg_set_current_groups_t)(struct group_info *);
 /* put_group_info 会内联展开到未导出的 groups_free，直接引用会让模块加载失败。 */
 typedef void (*nbg_groups_free_t)(struct group_info *);
 
+/* group_info::usage 在 6.12 改成了 refcount_t，早期内核仍是 atomic_t。 */
+static bool nbg_group_info_drop(struct group_info *groups)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    return refcount_dec_and_test(&groups->usage);
+#else
+    return atomic_dec_and_test(&groups->usage);
+#endif
+}
+
 static void nbg_put_group_info_safe(struct group_info *groups)
 {
     nbg_groups_free_t free_fn;
@@ -56,7 +68,7 @@ static void nbg_put_group_info_safe(struct group_info *groups)
         /* 取不到释放函数时宁可泄一次内核小对象，也不要在加载期多一个未定义符号。 */
         return;
 
-    if (atomic_dec_and_test(&groups->usage))
+    if (nbg_group_info_drop(groups))
         free_fn(groups);
 }
 
