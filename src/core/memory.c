@@ -103,8 +103,11 @@ static int noinline nbg_vmap_apply(pte_t *pte, unsigned long addr,
     return 0;
 }
 
-static void *nbg_vmap_pfn(unsigned long *pfns, unsigned long count,
-                          pgprot_t prot)
+/* 这三个符号不导出，只能经 kallsyms 拿到地址再调用。5.10/5.15 用 LTO 版 CFI，
+ * 类型 ID 在内核链接时统一分配，模块单独编译拿不到同一 ID，插桩的间接调用
+ * 会直接 panic；__nocfi 让这里不插桩。6.1+ 是 KCFI，按类型哈希校验，不受影响。 */
+static void *NBG_NO_CFI nbg_vmap_pfn(unsigned long *pfns, unsigned long count,
+                                     pgprot_t prot)
 {
     struct nbg_vmap_ctx ctx = {
         .pfns = pfns,
