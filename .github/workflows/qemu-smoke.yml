@@ -1,0 +1,147 @@
+name: QEMU smoke test
+
+# 用构建用的同一个 DDK 内核启动一台 arm64 虚机，把刚编出的模块 insmod 进内核，
+# 验证驱动真的能加载，而不是只看编译产物大小。
+on:
+  workflow_dispatch:
+    inputs:
+      kmi:
+        description: '要启动的 KMI（矩阵中的单个值）'
+        required: false
+        default: android15-6.6
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.kmi }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Boot ${{ inputs.kmi }} and load NBG.ko
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    container:
+      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-20260828
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    env:
+      KMI: ${{ inputs.kmi }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build kernel module
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}"
+          test -s NBG.ko
+          echo "KO size=$(stat -c %s NBG.ko) bytes"
+          cp NBG.ko "${GITHUB_WORKSPACE}/NBG.ko"
+
+      - name: Locate bootable kernel
+        run: |
+          set -euo pipefail
+          echo "KERNEL_SRC=${KERNEL_SRC}"
+          ls -la "${KERNEL_SRC}" | head -n 40
+          echo '--- arch/arm64/boot ---'
+          ls -la "${KERNEL_SRC}/arch/arm64/boot/" 2>/dev/null | head -n 20 || true
+          echo '--- candidate images ---'
+          find "${KERNEL_SRC}" -maxdepth 3 \( -name 'Image*' -o -name 'vmlinux*' \) -printf '%s %p\n' 2>/dev/null | sort -rn | head -n 10 || true
+
+      - name: Install qemu and busybox
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends qemu-system-arm busybox-static
+          command -v qemu-system-aarch64
+          command -v busybox
+
+      - name: Prepare boot image
+        run: |
+          set -euo pipefail
+          mkdir -p boot
+          if [ -s "${KERNEL_SRC}/arch/arm64/boot/Image" ]; then
+            cp "${KERNEL_SRC}/arch/arm64/boot/Image" boot/Image
+          elif [ -s "${KERNEL_SRC}/arch/arm64/boot/Image.gz" ]; then
+            cp "${KERNEL_SRC}/arch/arm64/boot/Image.gz" boot/Image.gz
+            gunzip -f boot/Image.gz
+          elif [ -s "${KERNEL_SRC}/vmlinux" ]; then
+            # vmlinux 是 ELF，objcopy 出裸二进制即可由 qemu 直接装载
+            objcopy -O binary -R .note -R .comment -S "${KERNEL_SRC}/vmlinux" boot/Image
+          else
+            echo '没有找到可启动的内核镜像' >&2
+            exit 1
+          fi
+          ls -la boot/Image
+
+      - name: Build initramfs
+        run: |
+          set -euo pipefail
+          rm -rf initramfs
+          mkdir -p initramfs/bin initramfs/proc initramfs/sys initramfs/dev
+          cp /bin/busybox initramfs/bin/busybox
+          cp NBG.ko initramfs/NBG.ko
+          cat > initramfs/init <<'INIT'
+          #!/bin/busybox sh
+          /bin/busybox mount -t proc proc /proc
+          /bin/busybox mount -t sysfs sys /sys
+          /bin/busybox mount -t devtmpfs dev /dev 2>/dev/null || true
+
+          echo "GUEST_KERNEL=$(/bin/busybox uname -r)"
+
+          if /bin/busybox insmod /NBG.ko; then
+            echo "INIT_MODULE_OK"
+          else
+            echo "INIT_MODULE_FAIL rc=$?"
+          fi
+
+          echo '--- /proc/modules ---'
+          /bin/busybox cat /proc/modules
+          echo '--- dmesg tail ---'
+          /bin/busybox dmesg | /bin/busybox tail -n 80
+          echo '--- guest done ---'
+          /bin/busybox poweroff -f
+          INIT
+          chmod +x initramfs/init
+          ( cd initramfs && find . -print | /bin/busybox cpio -o -H newc --quiet ) > initrd.cpio
+          gzip -9 -f initrd.cpio
+          ls -la initrd.cpio.gz
+
+      - name: Boot and load module
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 240 qemu-system-aarch64 \
+            -M virt -cpu max -m 2048 -smp 2 \
+            -kernel boot/Image -initrd initrd.cpio.gz \
+            -append 'console=ttyAMA0 rdinit=/init panic=-1 loglevel=7' \
+            -nographic -no-reboot > qemu.log 2>&1
+          rc=$?
+          set -e
+          echo "qemu_exit=$rc"
+          tail -n 60 qemu.log
+
+          if grep -q 'INIT_MODULE_OK' qemu.log; then
+            echo 'SMOKE_RESULT=module_loaded'
+          else
+            echo 'SMOKE_RESULT=module_load_failed' >&2
+            exit 1
+          fi
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-smoke-${{ inputs.kmi }}
+          path: qemu.log
+          if-no-files-found: warn
+          retention-days: 14
