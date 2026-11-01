@@ -1,0 +1,61 @@
+name: Kernel module check probe
+
+# 只用来核对内核里模块校验的真实逻辑：same_magic / check_modinfo /
+# VERMAGIC_STRING 的生成方式，避免靠记忆下结论。
+on:
+  workflow_dispatch:
+    inputs:
+      kmi:
+        description: '要查看的 KMI'
+        required: false
+        default: android14-6.1
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Inspect ${{ inputs.kmi }} module checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-20260828
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Dump module version logic
+        run: |
+          set -euo pipefail
+          SRC=/opt/ddk/src/${{ inputs.kmi }}
+          {
+            echo "=== same_magic / check_modinfo ==="
+            sed -n '1,200p' "$SRC/kernel/module/version.c" 2>/dev/null || \
+              sed -n '1,200p' "$SRC/kernel/module.c" | grep -n -A25 "same_magic" || echo '(not found)'
+
+            echo
+            echo "=== vermagic.h ==="
+            cat "$SRC/include/linux/vermagic.h" 2>/dev/null || echo '(not found)'
+
+            echo
+            echo "=== UTS_RELEASE / LOCALVERSION config ==="
+            grep -E "^CONFIG_LOCALVERSION|^CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG|^CONFIG_SMP|^CONFIG_PREEMPT" \
+              "$SRC/.config" 2>/dev/null || echo '(no .config)'
+            grep -rn "UTS_RELEASE" "$SRC/include/generated/utsrelease.h" 2>/dev/null || echo '(no utsrelease.h)'
+
+            echo
+            echo "=== 本树编译出的 vermagic 参考 ==="
+            grep -rn "VERMAGIC_STRING" "$SRC/include/linux/vermagic.h" 2>/dev/null || true
+          } > version_probe.txt
+          cat version_probe.txt
+
+      - name: Upload probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-probe-${{ inputs.kmi }}
+          path: version_probe.txt
+          if-no-files-found: warn
+          retention-days: 7
