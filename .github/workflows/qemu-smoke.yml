@@ -44,7 +44,7 @@ jobs:
           make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}"
           test -s NBG.ko
           echo "KO size=$(stat -c %s NBG.ko) bytes"
-          cp NBG.ko "${GITHUB_WORKSPACE}/NBG.ko"
+          ls -la NBG.ko
 
       - name: Locate bootable kernel
         run: |
