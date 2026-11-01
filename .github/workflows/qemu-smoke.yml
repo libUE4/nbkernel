@@ -78,17 +78,36 @@ jobs:
           {
             echo "KMI=${KMI}"
             echo "KERNEL_SRC=${KERNEL_SRC}"
+            echo '--- /opt/ddk ---'
+            ls /opt/ddk 2>/dev/null || true
+            ls /opt/ddk/src 2>/dev/null || true
+
+            VMALLOC_H=$(find /opt/ddk -path '*include/linux/vmalloc.h' 2>/dev/null | head -n 1)
+            MM_H=$(find /opt/ddk -path '*include/linux/mm.h' 2>/dev/null | head -n 1)
+            VMALLOC_C=$(find /opt/ddk -path '*/mm/vmalloc.c' 2>/dev/null | head -n 1)
+            MEMORY_C=$(find /opt/ddk -path '*/mm/memory.c' 2>/dev/null | head -n 1)
+            CONFIG=$(find /opt/ddk -name '.config' 2>/dev/null | head -n 1)
+
+            echo "VMALLOC_H=${VMALLOC_H:-none}"
+            echo "MM_H=${MM_H:-none}"
+            echo "VMALLOC_C=${VMALLOC_C:-none}"
+            echo "MEMORY_C=${MEMORY_C:-none}"
+
             echo '--- CFI config ---'
-            grep -E '^CONFIG_CFI_CLANG|^CONFIG_LTO_CLANG' "${KERNEL_SRC}/.config" 2>/dev/null || echo '(no .config)'
-            echo '--- vmalloc.h declarations ---'
-            grep -n 'get_vm_area_caller\|free_vm_area' "${KERNEL_SRC}/include/linux/vmalloc.h" 2>/dev/null || echo '(not found)'
+            [ -n "${CONFIG:-}" ] && grep -E 'CONFIG_CFI_CLANG|CONFIG_LTO_CLANG' "$CONFIG" || echo '(no .config)'
+
+            echo '--- vmalloc.h ---'
+            [ -n "${VMALLOC_H:-}" ] && grep -n 'get_vm_area_caller\|free_vm_area' "$VMALLOC_H" || echo '(not found)'
+
             echo '--- mm.h apply_to_page_range ---'
-            grep -n 'apply_to_page_range' "${KERNEL_SRC}/include/linux/mm.h" 2>/dev/null || echo '(not found)'
-            echo '--- mm/vmalloc.c definitions ---'
-            grep -n -B2 -A6 'get_vm_area_caller(unsigned long' "${KERNEL_SRC}/mm/vmalloc.c" 2>/dev/null || echo '(not found)'
-            echo '--- mm/memory.c apply_to_page_range ---'
-            grep -n -A6 'int apply_to_page_range(struct mm_struct' "${KERNEL_SRC}/mm/memory.c" 2>/dev/null || echo '(not found)'
-          } > kernel_api.txt
+            [ -n "${MM_H:-}" ] && grep -n 'apply_to_page_range' "$MM_H" || echo '(not found)'
+
+            echo '--- mm/vmalloc.c ---'
+            [ -n "${VMALLOC_C:-}" ] && grep -n -A5 'get_vm_area_caller(unsigned long' "$VMALLOC_C" || echo '(not found)'
+
+            echo '--- mm/memory.c ---'
+            [ -n "${MEMORY_C:-}" ] && grep -n -A5 'int apply_to_page_range(struct mm_struct' "$MEMORY_C" || echo '(not found)'
+          } > kernel_api.txt 2>&1
           cat kernel_api.txt
 
       - name: Locate bootable kernel
