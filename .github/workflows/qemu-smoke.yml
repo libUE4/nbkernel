@@ -87,42 +87,18 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf initramfs
-          mkdir -p initramfs/bin initramfs/etc initramfs/proc initramfs/sys initramfs/dev
-          cp /bin/busybox initramfs/bin/busybox
-          ln -sf busybox initramfs/bin/sh
-          # /init 直接是 busybox 二进制：这套内核 exec 带 shebang 的脚本会返回 ENOEXEC，
-          # argv[0] 为 init 时 busybox 会以自己的 init applet 启动。
-          cp /bin/busybox initramfs/init
+          mkdir -p initramfs
           cp NBG.ko initramfs/NBG.ko
-          mknod -m 622 initramfs/dev/console c 5 1 || true
-          mknod -m 666 initramfs/dev/null c 1 3 || true
-
-          cat > initramfs/etc/inittab <<'TAB'
-          ::sysinit:/bin/sh /test.sh
-          TAB
-
-          cat > initramfs/test.sh <<'SH'
-          BUSY=/bin/busybox
-          $BUSY mount -t proc proc /proc
-          $BUSY mount -t sysfs sys /sys
-          echo "GUEST_KERNEL=$($BUSY uname -r)"
-          if $BUSY insmod /NBG.ko; then
-            echo "INIT_MODULE_OK"
-          else
-            echo "INIT_MODULE_FAIL rc=$?"
-          fi
-          echo '--- /proc/modules ---'
-          $BUSY cat /proc/modules
-          echo '--- dmesg tail ---'
-          $BUSY dmesg | $BUSY tail -n 80
-          echo '--- guest done ---'
-          $BUSY poweroff -f
-          SH
-
-          chmod +x initramfs/init initramfs/bin/busybox initramfs/test.sh
+          # DDK 镜像是 x86-64，装出来的 busybox 在 arm64 guest 里是 ENOEXEC，
+          # 所以 init 用 freestanding 代码自己编，只依赖裸 syscall。
+          clang --target=aarch64-linux-gnu -O2 -ffreestanding -nostdlib \
+                -static -fno-pic -no-pie -fno-stack-protector -fno-builtin \
+                -Wl,-e,_start -Wl,--build-id=none \
+                -o initramfs/init test/qemu_init.c
+          file initramfs/init || true
           ( cd initramfs && find . -print | /bin/busybox cpio -o -H newc --quiet ) > initrd.cpio
           gzip -9 -f initrd.cpio
-          ls -la initrd.cpio.gz
+          ls -la initrd.cpio.gz initramfs/init
 
       - name: Boot and load module
         run: |
