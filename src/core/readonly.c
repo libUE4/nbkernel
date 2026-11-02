@@ -25,6 +25,7 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include "nbg_alloc.h"
+#include "memory.h"
 #include "nbg_compat.h"
 #include "export_fun.h"
 #include "nbg_readonly.h"
@@ -214,8 +215,9 @@ static const char *ro_anon_name(struct vm_area_struct *vma, char *scratch)
         size_t offset = offset_in_page(address);
         size_t available = min_t(size_t, NAME_MAX - used, PAGE_SIZE - offset);
         size_t length;
-        long pinned = get_user_pages_remote(vma->vm_mm, address & PAGE_MASK,
-                                           1, 0, &page, NULL, NULL);
+        long pinned = nbg_get_user_page_remote(vma->vm_mm,
+                                                   address & PAGE_MASK, 0,
+                                                   &page);
 
         if (pinned != 1) return ERR_PTR(pinned < 0 ? pinned : -EFAULT);
         mapped = compat_kmap_page(page);
@@ -225,7 +227,7 @@ static const char *ro_anon_name(struct vm_area_struct *vma, char *scratch)
         /* Release the ordinary GUP reference through a kernel entry point.
          * Inlining put_page here imports optional PAGE_PINNER internals from
          * the build headers, absent on several older device kernels. */
-        release_pages(&page, 1);
+        nbg_put_user_page(page);
         used += length;
         if (length < available) break;
         address += available;

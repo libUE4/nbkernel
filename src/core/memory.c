@@ -93,6 +93,29 @@ static nbg_free_vm_area_t nbg_free_vm_area;
 static struct mm_struct *nbg_init_mm;
 static struct memblock *nbg_memblock;
 
+/* kallsyms function pointers must be called from a no-CFI function on LTO-CFI kernels. */
+NBG_NO_CFI long nbg_get_user_page_remote(struct mm_struct *mm,
+                                         unsigned long address,
+                                         unsigned int flags,
+                                         struct page **page)
+{
+    if (!nbg_get_user_pages_remote_fn || !mm || !page)
+        return -ENOSYS;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+    return nbg_get_user_pages_remote_fn(mm, address, 1, flags, page, NULL);
+#else
+    return nbg_get_user_pages_remote_fn(mm, address, 1, flags, page,
+                                        NULL, NULL);
+#endif
+}
+
+NBG_NO_CFI void nbg_put_user_page(struct page *page)
+{
+    if (page && nbg_put_page_fn)
+        nbg_put_page_fn(page);
+}
+
 struct nbg_linearmap {
     unsigned long phys;
     unsigned long size;
@@ -557,13 +580,7 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
         size_t bytes = min_t(size_t, size - copied, PAGE_SIZE - offset);
         void *mapped;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-        ret = nbg_get_user_pages_remote_fn(mm, current_addr, 1, flags,
-                                           &page, NULL);
-#else
-        ret = nbg_get_user_pages_remote_fn(mm, current_addr, 1, flags,
-                                           &page, NULL, NULL);
-#endif
+        ret = nbg_get_user_page_remote(mm, current_addr, flags, &page);
         if (ret != 1) {
             if (ret >= 0) ret = -EFAULT;
             break;
@@ -572,7 +589,7 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
         mapped = compat_kmap_page(page);
         memcpy(output + copied, (u8 *)mapped + offset, bytes);
         compat_kunmap_page(mapped);
-        nbg_put_page_fn(page);
+        nbg_put_user_page(page);
         copied += bytes;
         ret = 0;
         if (!(copied & ((16U * PAGE_SIZE) - 1U)))

@@ -34,6 +34,7 @@
 #include <asm/processor.h>
 
 #include "comm.h"
+#include "memory.h"
 #include "nbg_compat.h"
 #include "nbg_ksyms.h"
 #include "query.h"
@@ -262,11 +263,7 @@ static ssize_t nbg_sensor_transfer(struct nbg_sensor_session *session,
         void *at;
 
         /* locked 传 NULL：GUP 不得丢 mmap 锁，否则 vma 会失效。 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-        ret = get_user_pages_remote(mm, addr, 1, flags, &page, NULL);
-#else
-        ret = get_user_pages_remote(mm, addr, 1, flags, &page, NULL, NULL);
-#endif
+        ret = nbg_get_user_page_remote(mm, addr, flags, &page);
         if (ret != 1) {
             if (ret >= 0)
                 ret = -EFAULT;
@@ -318,7 +315,7 @@ static ssize_t nbg_sensor_transfer(struct nbg_sensor_session *session,
         ret = 0;
 put:
         kunmap(page);
-        put_page(page);
+        nbg_put_user_page(page);
         if (ret)
             break;
         done += bytes;
