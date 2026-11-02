@@ -227,7 +227,7 @@ static const char *ro_anon_name(struct vm_area_struct *vma, char *scratch)
         /* Release the ordinary GUP reference through a kernel entry point.
          * Inlining put_page here imports optional PAGE_PINNER internals from
          * the build headers, absent on several older device kernels. */
-        nbg_put_user_page(page);
+        nbg_release_user_page(page);
         used += length;
         if (length < available) break;
         address += available;

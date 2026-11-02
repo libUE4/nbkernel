@@ -315,7 +315,7 @@ static ssize_t nbg_sensor_transfer(struct nbg_sensor_session *session,
         ret = 0;
 put:
         kunmap(page);
-        nbg_put_user_page(page);
+        nbg_release_user_page(page);
         if (ret)
             break;
         done += bytes;

@@ -82,12 +82,12 @@ typedef long (*nbg_get_user_pages_remote_t)(
     struct mm_struct *, unsigned long, unsigned long, unsigned int,
     struct page **, struct vm_area_struct **, int *);
 #endif
-typedef void (*nbg_put_page_t)(struct page *);
+typedef void (*nbg_release_pages_t)(struct page **, int);
 
 static nbg_get_user_pages_remote_t nbg_get_user_pages_remote_fn;
 
 static nbg_get_vm_area_caller_t nbg_get_vm_area_caller;
-static nbg_put_page_t nbg_put_page_fn;
+static nbg_release_pages_t nbg_release_pages_fn;
 static nbg_apply_to_page_range_t nbg_apply_to_page_range;
 static nbg_free_vm_area_t nbg_free_vm_area;
 static struct mm_struct *nbg_init_mm;
@@ -110,10 +110,10 @@ NBG_NO_CFI long nbg_get_user_page_remote(struct mm_struct *mm,
 #endif
 }
 
-NBG_NO_CFI void nbg_put_user_page(struct page *page)
+NBG_NO_CFI void nbg_release_user_page(struct page *page)
 {
-    if (page && nbg_put_page_fn)
-        nbg_put_page_fn(page);
+    if (page && nbg_release_pages_fn)
+        nbg_release_pages_fn(&page, 1);
 }
 
 struct nbg_linearmap {
@@ -568,7 +568,7 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
 
     if (nbytes) *nbytes = 0;
     if (!mm || !buffer || !size || !nbg_get_user_pages_remote_fn ||
-        !nbg_put_page_fn)
+        !nbg_release_pages_fn)
         return -EINVAL;
 
     compat_mmap_read_lock(mm);
@@ -589,7 +589,7 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
         mapped = compat_kmap_page(page);
         memcpy(output + copied, (u8 *)mapped + offset, bytes);
         compat_kunmap_page(mapped);
-        nbg_put_user_page(page);
+        nbg_release_user_page(page);;
         copied += bytes;
         ret = 0;
         if (!(copied & ((16U * PAGE_SIZE) - 1U)))
@@ -723,8 +723,8 @@ int nbg_memory_init(void)
     nbg_init_mm = (struct mm_struct *)generic_kallsyms_lookup_name("init_mm");
     nbg_get_user_pages_remote_fn = (nbg_get_user_pages_remote_t)
         generic_kallsyms_lookup_name("get_user_pages_remote");
-    nbg_put_page_fn = (nbg_put_page_t)
-        generic_kallsyms_lookup_name("__put_page");
+    nbg_release_pages_fn = (nbg_release_pages_t)
+        generic_kallsyms_lookup_name("release_pages");
     nbg_memblock = (struct memblock *)generic_kallsyms_lookup_name("memblock");
 
     if (!nbg_memblock)

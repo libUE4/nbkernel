@@ -20,7 +20,7 @@ void nbg_memory_exit(void);
 /* caller 持有 mm 的 mmap_read_lock；通过运行时符号解析避免厂商 GUP 内联依赖。 */
 long nbg_get_user_page_remote(struct mm_struct *mm, unsigned long address,
                               unsigned int flags, struct page **page);
-void nbg_put_user_page(struct page *page);
+void nbg_release_user_page(struct page *page);
 
 /* 内核 buffer 直读，免 copy_to_user */
 bool read_process_memory_kernel(pid_t pid, uintptr_t addr, void *buffer,
