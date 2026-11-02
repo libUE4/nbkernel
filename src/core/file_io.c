@@ -74,13 +74,8 @@ static void nbg_file_put_cred(struct cred *cred)
     drop = atomic_dec_and_test(&cred->usage);
 #endif
 
-    if (!drop)
+    if (!drop || !nbg_put_cred_fn)
         return;
-
-    if (!nbg_put_cred_fn) {
-        kfree(cred);
-        return;
-    }
 
     nbg_put_cred_fn(cred);
 }

@@ -7,6 +7,10 @@
 
 #include <linux/sched.h>
 
+#include <linux/uidgid.h>
+
 struct user_namespace *nbg_init_user_ns_addr(void);
+uid_t nbg_uid_from_kuid(kuid_t uid);
+uid_t nbg_uid_from_kuid_munged(kuid_t uid);
 
 #endif /* NBG_USER_NS_H */

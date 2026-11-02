@@ -93,7 +93,7 @@ static int nbg_udp_uid_from_pid(pid_t pid, uid_t *out_uid)
     rcu_read_lock();
     task = pid_task(find_vpid(pid), PIDTYPE_PID);
     if (task)
-        *out_uid = from_kuid(nbg_init_user_ns_addr(), task_uid(task));
+        *out_uid = nbg_uid_from_kuid(task_uid(task));
     rcu_read_unlock();
 
     return task ? 0 : -ESRCH;
@@ -105,7 +105,7 @@ static bool nbg_udp_sock_uid_ok(const struct sock *sk)
 
     if (!sk)
         return false;
-    sock_uid = from_kuid_munged(nbg_init_user_ns_addr(), sk->sk_uid);
+    sock_uid = nbg_uid_from_kuid_munged(sk->sk_uid);
     return sock_uid == READ_ONCE(g_udp_uid);
 }
 
@@ -178,8 +178,8 @@ static int nbg_udp_rcv_pre(struct kprobe *p, struct pt_regs *regs)
         if (atomic64_read(&g_udp_hits) <= 4 && sk)
             pr_info("nbg: udp uid mismatch want=%u got=%u\n",
                     (unsigned int)g_udp_uid,
-                    (unsigned int)from_kuid_munged(nbg_init_user_ns_addr(),
-                                                   sk->sk_uid));
+                    (unsigned int)nbg_uid_from_kuid_munged(
+                        sk->sk_uid));
         return 0;
     }
 

@@ -13,3 +13,17 @@ struct user_namespace *nbg_init_user_ns_addr(void)
 
     return cached;
 }
+
+uid_t nbg_uid_from_kuid(kuid_t uid)
+{
+    struct user_namespace *ns = nbg_init_user_ns_addr();
+
+    return ns ? from_kuid(ns, uid) : (uid_t)-1;
+}
+
+uid_t nbg_uid_from_kuid_munged(kuid_t uid)
+{
+    struct user_namespace *ns = nbg_init_user_ns_addr();
+
+    return ns ? from_kuid_munged(ns, uid) : (uid_t)-1;
+}
