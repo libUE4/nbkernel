@@ -73,8 +73,23 @@ typedef struct vm_struct *(*nbg_get_vm_area_caller_t)(unsigned long,
 typedef int (*nbg_apply_to_page_range_t)(struct mm_struct *, unsigned long,
                                          unsigned long, pte_fn_t, void *);
 typedef void (*nbg_free_vm_area_t)(struct vm_struct *);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+typedef long (*nbg_get_user_pages_remote_t)(
+    struct mm_struct *, unsigned long, unsigned long, unsigned int,
+    struct page **, struct vm_area_struct **);
+#else
+typedef long (*nbg_get_user_pages_remote_t)(
+    struct mm_struct *, unsigned long, unsigned long, unsigned int,
+    struct page **, struct vm_area_struct **, int *);
+#endif
+typedef void (*nbg_put_page_t)(struct page *);
+
+static nbg_get_user_pages_remote_t nbg_get_user_pages_remote_fn;
+
+typedef void (*nbg_put_page_t)(struct page *);
 
 static nbg_get_vm_area_caller_t nbg_get_vm_area_caller;
+static nbg_put_page_t nbg_put_page_fn;
 static nbg_apply_to_page_range_t nbg_apply_to_page_range;
 static nbg_free_vm_area_t nbg_free_vm_area;
 static struct mm_struct *nbg_init_mm;
@@ -531,7 +546,8 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
     int ret = 0;
 
     if (nbytes) *nbytes = 0;
-    if (!mm || !buffer || !size)
+    if (!mm || !buffer || !size || !nbg_get_user_pages_remote_fn ||
+        !nbg_put_page_fn)
         return -EINVAL;
 
     compat_mmap_read_lock(mm);
@@ -543,13 +559,12 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
         size_t bytes = min_t(size_t, size - copied, PAGE_SIZE - offset);
         void *mapped;
 
-        /* A NULL locked argument keeps GUP from dropping mmap_lock while the
-         * caller continues to use the mm and its VMA. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-        ret = get_user_pages_remote(mm, current_addr, 1, flags, &page, NULL);
+        ret = nbg_get_user_pages_remote_fn(mm, current_addr, 1, flags,
+                                           &page, NULL);
 #else
-        ret = get_user_pages_remote(mm, current_addr, 1, flags, &page,
-                                    NULL, NULL);
+        ret = nbg_get_user_pages_remote_fn(mm, current_addr, 1, flags,
+                                           &page, NULL, NULL);
 #endif
         if (ret != 1) {
             if (ret >= 0) ret = -EFAULT;
@@ -559,7 +574,7 @@ static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
         mapped = compat_kmap_page(page);
         memcpy(output + copied, (u8 *)mapped + offset, bytes);
         compat_kunmap_page(mapped);
-        put_page(page);
+        nbg_put_page_fn(page);
         copied += bytes;
         ret = 0;
         if (!(copied & ((16U * PAGE_SIZE) - 1U)))
@@ -691,6 +706,10 @@ int nbg_memory_init(void)
     nbg_free_vm_area = (nbg_free_vm_area_t)
         generic_kallsyms_lookup_name("free_vm_area");
     nbg_init_mm = (struct mm_struct *)generic_kallsyms_lookup_name("init_mm");
+    nbg_get_user_pages_remote_fn = (nbg_get_user_pages_remote_t)
+        generic_kallsyms_lookup_name("get_user_pages_remote");
+    nbg_put_page_fn = (nbg_put_page_t)
+        generic_kallsyms_lookup_name("__put_page");
     nbg_memblock = (struct memblock *)generic_kallsyms_lookup_name("memblock");
 
     if (!nbg_memblock)
