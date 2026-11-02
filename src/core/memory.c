@@ -86,8 +86,6 @@ typedef void (*nbg_put_page_t)(struct page *);
 
 static nbg_get_user_pages_remote_t nbg_get_user_pages_remote_fn;
 
-typedef void (*nbg_put_page_t)(struct page *);
-
 static nbg_get_vm_area_caller_t nbg_get_vm_area_caller;
 static nbg_put_page_t nbg_put_page_fn;
 static nbg_apply_to_page_range_t nbg_apply_to_page_range;
