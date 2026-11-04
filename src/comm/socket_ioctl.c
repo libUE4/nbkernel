@@ -33,6 +33,7 @@
 #include "memory.h"
 #include "process.h"
 #include "query.h"
+#include "gyro.h"
 #include "touch.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
@@ -1279,6 +1280,8 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         return nbg_query_signal((void __user *)arg);
     case OP_EXECUTE_PACGA:
         return nbg_query_pacga((void __user *)arg);
+    case OP_CONFIG_GYRO:
+        return nbg_gyro_ioctl(arg);
 
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;

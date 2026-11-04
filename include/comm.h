@@ -282,6 +282,15 @@ typedef struct _NBG_PACGA_REQ {
     uint64_t out_result;
 } NBG_PACGA_REQ, *PNBG_PACGA_REQ;
 
+/* action: 0=关闭 1=开启；type_mask 位 0=陀螺仪 位 1=加速度计。
+ * x/y 为 IEEE754 单精度位模式，直接与事件里的原始值相加。 */
+typedef struct _NBG_GYRO_REQ {
+    int32_t action;
+    uint32_t type_mask;
+    int32_t x;
+    int32_t y;
+} NBG_GYRO_REQ, *PNBG_GYRO_REQ;
+
 typedef struct _TOUCH_POINT {
     int x;
     int y;
