@@ -95,6 +95,8 @@ enum OPERATIONS {
     OP_QUERY_SIGNAL     = 0x95B,
     /* 用目标线程的 APGA 密钥执行 PACGA，解析受 PAC 保护的指针。 */
     OP_EXECUTE_PACGA    = 0x95C,
+    /* 陀螺仪/加速度计数据覆盖：在 system_server 的 sendto 上叠加偏移。 */
+    OP_CONFIG_GYRO      = 0x95D,
 };
 
 typedef struct _INIT_KEY {

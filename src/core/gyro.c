@@ -13,6 +13,7 @@
 #include <linux/uaccess.h>
 
 #include "comm.h"
+#include "gyro.h"
 #include "nbg_compat.h"
 #include "nbg_gki_compat.h"
 #include "nbg_log.h"
@@ -137,7 +138,10 @@ static void nbg_gyro_patch_event(unsigned long uevent, u32 type_mask,
     xy[0] = nbg_add_float_ieee754(xy[0], dx);
     xy[1] = nbg_add_float_ieee754(xy[1], dy);
 
-    copy_to_user((void __user *)(uevent + NBG_SENSOR_XY_OFF), xy, sizeof(xy));
+    /* 写回失败不影响其它事件，应用侧读到的仍是更新前的读数。 */
+    if (copy_to_user((void __user *)(uevent + NBG_SENSOR_XY_OFF), xy,
+                     sizeof(xy)))
+        return;
 }
 
 NBG_NO_CFI
