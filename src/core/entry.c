@@ -24,7 +24,6 @@
 #include "touch.h"
 #include "comm.h"
 #include "memory.h"
-#include "gyro.h"
 #include "nbg_log.h"
 #include "nbg_ksyms.h"
 #include "nbg_compat.h"
@@ -217,15 +216,11 @@ static int nbg_init(void)
      * reserves high MT slots on the physical touchscreen so real and injected
      * contacts remain in one Android MotionEvent stream. */
 
-    /* 传感器覆盖只在客户端下命令后才真正生效，挂不上 probe 也不影响加载。 */
-    nbg_gyro_init();
-
     return 0;
 }
 
 static void nbg_exit(void)
 {
-    nbg_gyro_exit();
     nbg_comm_exit();
     nbg_memory_cache_cleanup();
     auto_unhide_all(0);

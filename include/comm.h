@@ -95,8 +95,6 @@ enum OPERATIONS {
     OP_QUERY_SIGNAL     = 0x95B,
     /* 用目标线程的 APGA 密钥执行 PACGA，解析受 PAC 保护的指针。 */
     OP_EXECUTE_PACGA    = 0x95C,
-    /* 陀螺仪/加速度计数据覆盖：在 system_server 的 sendto 上叠加偏移。 */
-    OP_CONFIG_GYRO      = 0x95D,
 };
 
 typedef struct _INIT_KEY {
@@ -283,15 +281,6 @@ typedef struct _NBG_PACGA_REQ {
     uint64_t modifier;
     uint64_t out_result;
 } NBG_PACGA_REQ, *PNBG_PACGA_REQ;
-
-/* action: 0=关闭 1=开启；type_mask 位 0=陀螺仪 位 1=加速度计。
- * x/y 为 IEEE754 单精度位模式，直接与事件里的原始值相加。 */
-typedef struct _NBG_GYRO_REQ {
-    int32_t action;
-    uint32_t type_mask;
-    int32_t x;
-    int32_t y;
-} NBG_GYRO_REQ, *PNBG_GYRO_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;

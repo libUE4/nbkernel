@@ -13,7 +13,6 @@ $(MODULE_NAME)-objs := \
 	src/core/nbg_log.o \
 	src/core/process.o \
 	src/core/query.o \
-	src/core/gyro.o \
 	src/core/readonly.o \
 	src/core/target.o \
 	src/comm/socket_ioctl.o \
