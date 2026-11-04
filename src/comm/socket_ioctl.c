@@ -32,6 +32,7 @@
 #include "nbg_readonly.h"
 #include "memory.h"
 #include "process.h"
+#include "query.h"
 #include "touch.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
@@ -1252,6 +1253,31 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
             return -EFAULT;
         return req.pid > 0 ? 0 : -ESRCH;
     }
+    case OP_GET_PID:
+        return nbg_query_pid((void __user *)arg);
+    case OP_GET_PIDS:
+        return nbg_query_pids((void __user *)arg);
+    case OP_MODULE_BASE_EX:
+        return nbg_query_module_base((void __user *)arg);
+    case OP_MODULE_BASE2_EX:
+        return nbg_query_module_base2((void __user *)arg);
+    case OP_MODULE_PATH_EX:
+        return nbg_query_module_path((void __user *)arg);
+    case OP_GET_TLS:
+        return nbg_query_tls((void __user *)arg);
+    case OP_GET_THREAD_TID:
+        return nbg_query_thread_tid((void __user *)arg);
+    case OP_GET_THREAD_TIDS:
+        return nbg_query_thread_tids((void __user *)arg);
+    case OP_GET_THREAD_STACK:
+        return nbg_query_thread_stack((void __user *)arg);
+    case OP_QUERY_MAPPING:
+        return nbg_query_mapping((void __user *)arg);
+    case OP_QUERY_ACCESS:
+        return nbg_query_access((void __user *)arg);
+    case OP_QUERY_SIGNAL:
+        return nbg_query_signal((void __user *)arg);
+
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;
 

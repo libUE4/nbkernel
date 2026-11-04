@@ -1132,3 +1132,104 @@ int nbg_readv_memory_fault(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
 {
     return nbg_readv_memory_mode(pid, iov, count, true);
 }
+
+/* ---- 可复用的 mm 上下文（供查询接口使用） ---- */
+
+int nbg_read_ctx_init_pid(struct nbg_read_ctx *ctx, pid_t pid)
+{
+    struct task_struct *task;
+    struct mm_struct *mm;
+
+    if (!ctx || pid <= 0)
+        return -EINVAL;
+
+    ctx->pid = 0;
+    ctx->mm = NULL;
+
+    rcu_read_lock();
+    task = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if (task)
+        get_task_struct(task);
+    rcu_read_unlock();
+    if (!task)
+        return -ESRCH;
+
+    mm = get_task_mm(task);
+    put_task_struct(task);
+    if (!mm)
+        return -EINVAL;
+
+    ctx->pid = pid;
+    ctx->mm = mm;
+    return 0;
+}
+
+int nbg_read_ctx_init_current(struct nbg_read_ctx *ctx, pid_t expected_tgid)
+{
+    struct mm_struct *mm;
+
+    if (!ctx || expected_tgid <= 0)
+        return -EINVAL;
+
+    ctx->pid = 0;
+    ctx->mm = NULL;
+
+    if (current->tgid != expected_tgid)
+        return -ESRCH;
+
+    mm = get_task_mm(current);
+    if (!mm)
+        return -EINVAL;
+
+    ctx->pid = expected_tgid;
+    ctx->mm = mm;
+    return 0;
+}
+
+long nbg_read_ctx_read(struct nbg_read_ctx *ctx, uint64_t addr, void *buf,
+                       size_t size)
+{
+    unsigned long remote_start;
+    size_t done;
+    int ret;
+
+    if (!ctx || !ctx->mm || !buf)
+        return -EINVAL;
+    if (size == 0 || size > NBG_MAX_RW_SIZE)
+        return -EINVAL;
+
+    ret = nbg_normalize_remote_range((uintptr_t)addr, size, &remote_start);
+    if (ret)
+        return ret;
+
+    done = 0;
+    ret = nbg_remote_read_kernel_pte_mm(ctx->mm, remote_start, buf, size,
+                                        &done);
+    if (ret)
+        return ret;
+    return done == size ? 0 : -EFAULT;
+}
+
+void nbg_read_ctx_release(struct nbg_read_ctx *ctx)
+{
+    if (!ctx)
+        return;
+    if (ctx->mm)
+        mmput(ctx->mm);
+    ctx->pid = 0;
+    ctx->mm = NULL;
+}
+
+long nbg_read_kernel(pid_t pid, uint64_t addr, void *buf, size_t size)
+{
+    struct nbg_read_ctx ctx;
+    long ret;
+
+    ret = nbg_read_ctx_init_pid(&ctx, pid);
+    if (ret)
+        return ret;
+
+    ret = nbg_read_ctx_read(&ctx, addr, buf, size);
+    nbg_read_ctx_release(&ctx);
+    return ret;
+}

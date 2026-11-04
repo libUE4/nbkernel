@@ -79,6 +79,20 @@ enum OPERATIONS {
     /* Read one existing KGSL object's metadata. No target task execution,
      * user-memory write, GPU allocation, free, or generic ioctl forwarding. */
     OP_KGSL_GPUOBJ_INFO = 0x93B,
+
+    /* 进程 / 线程 / 地址查询 */
+    OP_GET_PID          = 0x950,
+    OP_GET_PIDS         = 0x951,
+    OP_MODULE_BASE_EX   = 0x952,
+    OP_MODULE_BASE2_EX  = 0x953,
+    OP_MODULE_PATH_EX   = 0x954,
+    OP_GET_TLS          = 0x955,
+    OP_GET_THREAD_TID   = 0x956,
+    OP_GET_THREAD_TIDS  = 0x957,
+    OP_GET_THREAD_STACK = 0x958,
+    OP_QUERY_MAPPING    = 0x959,
+    OP_QUERY_ACCESS     = 0x95A,
+    OP_QUERY_SIGNAL     = 0x95B,
 };
 
 typedef struct _INIT_KEY {
@@ -125,6 +139,135 @@ typedef struct _FIND_PID_REQ {
     char *name;
     pid_t pid;
 } FIND_PID_REQ, *PFIND_PID_REQ;
+
+/* ==================== 查询组 ABI ==================== */
+
+#define NBG_GET_PIDS_MAX         64U
+#define NBG_GET_THREAD_TIDS_MAX  64U
+#define NBG_THREAD_TID_F_ON_CPU  (1U << 0)
+#define NBG_THREAD_TID_F_RUNNING (1U << 1)
+
+#define NBG_MAPPING_F_READ   (1U << 0)
+#define NBG_MAPPING_F_WRITE  (1U << 1)
+#define NBG_MAPPING_F_EXEC   (1U << 2)
+#define NBG_MAPPING_F_SHARED (1U << 3)
+
+#define NBG_ACCESS_UNMAPPED    0U
+#define NBG_ACCESS_RESIDENT    1U
+#define NBG_ACCESS_NONRESIDENT 2U
+#define NBG_ACCESS_UNSUPPORTED 3U
+
+typedef struct _NBG_GET_PID_REQ {
+    char name[256];
+    int32_t out_pid;
+    uint32_t reserved;
+} NBG_GET_PID_REQ, *PNBG_GET_PID_REQ;
+
+/* out_total 可能大于 out_count，调用方需当作被截断处理。 */
+typedef struct _NBG_GET_PIDS_REQ {
+    char name[256];
+    uint32_t out_count;
+    uint32_t out_total;
+    int32_t out_pids[NBG_GET_PIDS_MAX];
+} NBG_GET_PIDS_REQ, *PNBG_GET_PIDS_REQ;
+
+/* 匹配用 VMA 文件名的 d_name + strstr；首个匹配起始为 base，
+ * 最后一个匹配结束为 size 上界。 */
+typedef struct _NBG_MODULE_BASE_REQ {
+    int32_t pid;
+    uint32_t reserved;
+    char name[256];
+    uint64_t out_base;
+    uint64_t out_size;
+} NBG_MODULE_BASE_REQ, *PNBG_MODULE_BASE_REQ;
+
+/* max_vma_size 非 0 时跳过单体超过它的 VMA。 */
+typedef struct _NBG_MODULE_BASE2_REQ {
+    int32_t pid;
+    uint32_t reserved;
+    uint64_t max_vma_size;
+    char name[256];
+    uint64_t out_base;
+    uint64_t out_size;
+} NBG_MODULE_BASE2_REQ, *PNBG_MODULE_BASE2_REQ;
+
+/* 返回首个匹配 VMA 的完整 d_path，用于区分包名。 */
+typedef struct _NBG_MODULE_PATH_REQ {
+    int32_t pid;
+    uint32_t reserved;
+    char name[256];
+    char out_path[256];
+} NBG_MODULE_PATH_REQ, *PNBG_MODULE_PATH_REQ;
+
+typedef struct _NBG_GET_TLS_REQ {
+    int32_t pid;
+    uint32_t reserved;
+    uint64_t out_tls;
+} NBG_GET_TLS_REQ, *PNBG_GET_TLS_REQ;
+
+typedef struct _NBG_GET_THREAD_TID_REQ {
+    int32_t pid;
+    uint32_t reserved;
+    char comm[256];
+    int32_t out_tid;
+} NBG_GET_THREAD_TID_REQ, *PNBG_GET_THREAD_TID_REQ;
+
+typedef struct _NBG_THREAD_TID_INFO {
+    int32_t tid;
+    uint32_t flags;
+    uint64_t exec_ns;
+} NBG_THREAD_TID_INFO, *PNBG_THREAD_TID_INFO;
+
+typedef struct _NBG_GET_THREAD_TIDS_REQ {
+    int32_t pid;
+    uint32_t out_count;
+    uint32_t out_total;
+    uint32_t reserved;
+    char comm[256];
+    NBG_THREAD_TID_INFO out_threads[NBG_GET_THREAD_TIDS_MAX];
+} NBG_GET_THREAD_TIDS_REQ, *PNBG_GET_THREAD_TIDS_REQ;
+
+typedef struct _NBG_GET_THREAD_STACK_REQ {
+    int32_t tid;
+    int32_t out_named;
+    uint64_t out_low;
+    uint64_t out_high;
+    uint64_t out_tls;
+} NBG_GET_THREAD_STACK_REQ, *PNBG_GET_THREAD_STACK_REQ;
+
+typedef struct _NBG_QUERY_MAPPING_REQ {
+    int32_t pid;
+    uint32_t flags;
+    uint64_t addr;
+    uint64_t out_phys_addr;
+    uint64_t out_page_size;
+    uint32_t out_flags;
+    uint32_t reserved;
+} NBG_QUERY_MAPPING_REQ, *PNBG_QUERY_MAPPING_REQ;
+
+typedef struct _NBG_QUERY_ACCESS_REQ {
+    int32_t pid;
+    uint32_t flags;
+    uint64_t addr;
+    uint64_t out_start;
+    uint64_t out_end;
+    uint32_t out_permissions;
+    uint32_t out_state;
+} NBG_QUERY_ACCESS_REQ, *PNBG_QUERY_ACCESS_REQ;
+
+typedef struct _NBG_QUERY_SIGNAL_REQ {
+    int32_t tid;
+    uint32_t signo;
+    uint64_t out_handler;
+    uint64_t out_flags;
+    uint64_t out_restorer;
+    uint64_t out_action_mask;
+    uint64_t out_blocked;
+    uint64_t out_alt_sp;
+    uint64_t out_alt_size;
+    uint32_t out_alt_flags;
+    int32_t out_tgid;
+} NBG_QUERY_SIGNAL_REQ, *PNBG_QUERY_SIGNAL_REQ;
 
 typedef struct _TOUCH_POINT {
     int x;
