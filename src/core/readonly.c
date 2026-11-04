@@ -12,6 +12,7 @@
 #include <linux/mm_inline.h>
 #include <linux/pid.h>
 #include <linux/ptrace.h>
+#include <linux/random.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
@@ -374,6 +375,29 @@ static long ro_fd_ioctl(unsigned long argument)
     return copy_to_user((void __user *)argument, &req, sizeof(req)) ? -EFAULT : 0;
 }
 NBG_NO_CFI
+/* 由内核随机池填充调用方缓冲区：最多 64 字节，不引入任何未导出符号。 */
+static long ro_random_ioctl(unsigned long argument)
+{
+    struct NbgRoRandom req;
+    u8 bytes[64];
+
+    if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
+        return -EFAULT;
+    if (req.abi != NBG_RO_ABI || !req.size || req.size > sizeof(bytes) ||
+        !req.buffer)
+        return -EINVAL;
+
+    get_random_bytes(bytes, req.size);
+    if (copy_to_user((void __user *)(unsigned long)req.buffer, bytes,
+                     req.size))
+        return -EFAULT;
+
+    req.result = req.size;
+    if (copy_to_user((void __user *)argument, &req, sizeof(req)))
+        return -EFAULT;
+    return 0;
+}
+
 static long ro_file_ioctl(unsigned long argument)
 {
     struct NbgRoFile req;
@@ -445,6 +469,7 @@ long nbg_readonly_ioctl(unsigned int command, unsigned long argument)
     case NBG_RO_THREAD: return ro_thread_ioctl(argument);
     case NBG_RO_THREAD_FPSTATE: return ro_thread_fpstate_ioctl(argument);
     case NBG_RO_FD: return ro_fd_ioctl(argument);
+    case NBG_RO_RANDOM: return ro_random_ioctl(argument);
     case NBG_RO_FILE: return ro_file_ioctl(argument);
     default: return -ENOTTY;
     }

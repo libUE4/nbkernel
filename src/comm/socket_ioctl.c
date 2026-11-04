@@ -1464,6 +1464,7 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
     case NBG_RO_THREAD:
     case NBG_RO_THREAD_FPSTATE:
     case NBG_RO_FD:
+    case NBG_RO_RANDOM:
     case NBG_RO_FILE:
         return nbg_readonly_ioctl(cmd, arg);
     case NBG_RO_INPUT_SUBSCRIBE:
