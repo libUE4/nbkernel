@@ -1,1066 +1,1014 @@
-/* memory.c — 跨进程内存读取
+/* memory.c — remote process memory access
  *
- * 页表遍历取得物理地址，再经预先建立的 non-cacheable 直映射读取目标内存。
- * 该路径不经过 PTE 权限位，因此能读到 present 但用户态不可访问的页面。
- *
- * linearmap 在模块初始化时建立一次：遍历 memblock 的全部内存区域，
- * 以 MT_NORMAL_NC 属性把它们映射到内核虚拟地址空间。之后每次读取只需
- * 一次页表遍历定位物理地址，加一次线性偏移。
+ * Reads and writes walk the target page tables directly and take a short page
+ * reference while copying. The explicit fault-read operation resolves a
+ * missing page through the kernel fault-fixup path, then retries the same PTE
+ * path. No GUP or long-term page pin is used.
  */
 #include "memory.h"
-#include "nbg_alloc.h"
-
-#include <linux/highmem.h>
-#include <linux/hardirq.h>
-#include <linux/io.h>
-#include <linux/memblock.h>
-#include <linux/mm.h>
-#include <linux/printk.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/task.h>
-#include <linux/slab.h>
-#include <linux/uaccess.h>
-#include <linux/vmalloc.h>
-#include <linux/version.h>
-
-#include <asm/cacheflush.h>
-#include <asm/memory.h>
-#include <asm/pgtable.h>
-
 #include "nbg_compat.h"
 #include "nbg_ksyms.h"
+#include <linux/mm.h>
+#include <linux/version.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
+#include <linux/pid.h>
+#include <linux/hardirq.h>
+#include <linux/string.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+#include <linux/uaccess.h>
+#include <linux/highmem.h>
+#include <linux/mutex.h>
+#include <linux/jiffies.h>
+#include <linux/sched.h>
+#include <linux/page_ref.h>
+#include <asm/pgtable.h>
+#include <asm/memory.h>
+#include <asm/processor.h>
 
-#ifndef PAGE_ALIGN_START
-#define PAGE_ALIGN_START(x) ((x) & PAGE_MASK)
-#endif
+#define NBG_MM_CACHE_TTL        (HZ)
+#define NBG_READ_STACK_CHUNK    1024U
 
-#ifndef PAGE_ALIGN_END
-#define PAGE_ALIGN_END(x) PAGE_ALIGN(x)
-#endif
+static DEFINE_MUTEX(nbg_mm_cache_lock);
+static struct pid *nbg_cached_pid_ref;
+static struct task_struct *nbg_cached_task;
+static unsigned long nbg_cached_expires;
 
-#ifndef pmd_cont
-#define pmd_cont(x) 0
-#endif
+typedef int (*nbg_fixup_user_fault_t)(struct mm_struct *mm,
+                                      unsigned long address,
+                                      unsigned int fault_flags,
+                                      bool *unlocked);
 
-#ifndef pmd_leaf_size
-#define pmd_leaf_size(x) PMD_SIZE
-#endif
+static nbg_fixup_user_fault_t nbg_fixup_user_fault_fn;
 
-#ifndef CONT_PMD_SIZE
-#define CONT_PMD_SIZE PMD_SIZE
-#endif
+/* arm64's is_zero_pfn inline imports zero_pfn, which is not in every GKI
+ * export list. Keep the exact PFN comparison against the kernel's own value;
+ * never accept arbitrary special PTEs or treat the shared zero page writable. */
+static unsigned long *nbg_kernel_zero_pfn;
 
-#ifndef CONT_PMD_MASK
-#define CONT_PMD_MASK (~(CONT_PMD_SIZE - 1))
-#endif
-
-#ifndef CONT_PTE_SIZE
-#define CONT_PTE_SIZE PAGE_SIZE
-#endif
-
-#ifndef CONT_PTE_MASK
-#define CONT_PTE_MASK (~(CONT_PTE_SIZE - 1))
-#endif
-
-#define NBG_STACK_PFN_COUNT   16UL
-#define NBG_KMALLOC_PFN_COUNT (NBG_STACK_PFN_COUNT * 32UL)
-#define NBG_READ_MAX          (4UL * 1024UL * 1024UL)
-
-/* vmap/vmalloc 符号在部分 GKI 分支不导出，统一走 kallsyms 解析。 */
-typedef struct vm_struct *(*nbg_get_vm_area_caller_t)(unsigned long,
-                                                      unsigned long,
-                                                      const void *);
-typedef int (*nbg_apply_to_page_range_t)(struct mm_struct *, unsigned long,
-                                         unsigned long, pte_fn_t, void *);
-typedef void (*nbg_free_vm_area_t)(struct vm_struct *);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-typedef long (*nbg_get_user_pages_remote_t)(
-    struct mm_struct *, unsigned long, unsigned long, unsigned int,
-    struct page **, struct vm_area_struct **);
-#else
-typedef long (*nbg_get_user_pages_remote_t)(
-    struct mm_struct *, unsigned long, unsigned long, unsigned int,
-    struct page **, struct vm_area_struct **, int *);
-#endif
-typedef void (*nbg_release_pages_t)(struct page **, int);
-
-static nbg_get_user_pages_remote_t nbg_get_user_pages_remote_fn;
-
-static nbg_get_vm_area_caller_t nbg_get_vm_area_caller;
-static nbg_release_pages_t nbg_release_pages_fn;
-static nbg_apply_to_page_range_t nbg_apply_to_page_range;
-static nbg_free_vm_area_t nbg_free_vm_area;
-static struct mm_struct *nbg_init_mm;
-static struct memblock *nbg_memblock;
-
-/* kallsyms function pointers must be called from a no-CFI function on LTO-CFI kernels. */
-NBG_NO_CFI long nbg_get_user_page_remote(struct mm_struct *mm,
-                                         unsigned long address,
-                                         unsigned int flags,
-                                         struct page **page)
+static bool nbg_is_zero_pfn(unsigned long pfn)
 {
-    if (!nbg_get_user_pages_remote_fn || !mm || !page)
-        return -ENOSYS;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-    return nbg_get_user_pages_remote_fn(mm, address, 1, flags, page, NULL);
-#else
-    return nbg_get_user_pages_remote_fn(mm, address, 1, flags, page,
-                                        NULL, NULL);
-#endif
+    return pfn == READ_ONCE(*nbg_kernel_zero_pfn);
 }
 
-NBG_NO_CFI void nbg_release_user_page(struct page *page)
+typedef void (*nbg_flush_icache_range_t)(unsigned long start,
+                                         unsigned long end);
+static nbg_flush_icache_range_t nbg_flush_icache_range_fn;
+
+/* 5.15+ arm64 keeps flush_icache_range() as a header inline and exports its
+ * two implementation pieces instead of the old __flush_icache_range symbol.
+ * Resolve both layouts so OP_FLUSH_ICACHE has the same semantics across the
+ * supported GKI branches. */
+typedef void (*nbg_caches_clean_inval_pou_t)(unsigned long start,
+                                             unsigned long end);
+typedef void (*nbg_kick_all_cpus_sync_t)(void);
+static nbg_caches_clean_inval_pou_t nbg_caches_clean_inval_pou_fn;
+static nbg_kick_all_cpus_sync_t nbg_kick_all_cpus_sync_fn;
+
+/* Android GKI enables CONFIG_PAGE_PINNER on multiple branches.  The public
+ * put_page()/folio_put() inline path calls page_pinner_put_page(), which
+ * creates direct relocations against page_pinner_inited and
+ * __page_pinner_* helpers.  Several vendor 5.10/5.15/6.x kernels keep those
+ * symbols private, so a module that otherwise matches the ABI fails at insmod
+ * with "Unknown symbol page_pinner_inited".
+ *
+ * The memory code only takes a short, ordinary page reference while holding the
+ * target page-table lock; it never uses pin_user_pages/FOLL_PIN.  Drop that
+ * ordinary ref with the raw page_ref primitive plus the exported slow release
+ * helper.  The PTE walker rejects devmap pages before refs are taken, so this
+ * helper is used only for normal RAM pages.
+ */
+static inline bool nbg_page_ref_try_get(struct page *page)
 {
-    if (page && nbg_release_pages_fn)
-        nbg_release_pages_fn(&page, 1);
+    struct page *head;
+
+    if (!page)
+        return false;
+    head = compound_head(page);
+    return get_page_unless_zero(head) != 0;
 }
 
-struct nbg_linearmap {
-    unsigned long phys;
-    unsigned long size;
-    unsigned long virt_nc;
-};
-
-static struct nbg_linearmap *g_linearmap;
-static unsigned long g_linearmap_count;
-static bool g_linearmap_ready;
-static struct rw_semaphore g_linearmap_lock;
-
-struct nbg_vmap_ctx {
-    unsigned long *pfns;
-    pgprot_t prot;
-    unsigned long index;
-};
-
-static int noinline nbg_vmap_apply(pte_t *pte, unsigned long addr,
-                                   void *private)
+static inline void nbg_page_ref_put(struct page *page)
 {
-    struct nbg_vmap_ctx *ctx = private;
+    struct page *head;
 
-    *pte = pfn_pte(ctx->pfns[ctx->index++], ctx->prot);
-    return 0;
-}
-
-/* 这三个符号不导出，只能经 kallsyms 拿到地址再调用。5.10/5.15 用 LTO 版 CFI，
- * 类型 ID 在内核链接时统一分配，模块单独编译拿不到同一 ID，插桩的间接调用
- * 会直接 panic；__nocfi 让这里不插桩。6.1+ 是 KCFI，按类型哈希校验，不受影响。 */
-static void *NBG_NO_CFI nbg_vmap_pfn(unsigned long *pfns, unsigned long count,
-                                     pgprot_t prot)
-{
-    struct nbg_vmap_ctx ctx = {
-        .pfns = pfns,
-        .prot = prot,
-        .index = 0,
-    };
-    struct vm_struct *area;
-
-    if (!nbg_get_vm_area_caller || !nbg_apply_to_page_range ||
-        !nbg_free_vm_area || !nbg_init_mm)
-        return NULL;
-
-    area = nbg_get_vm_area_caller(count * PAGE_SIZE, 0,
-                                  __builtin_return_address(0));
-    if (!area)
-        return NULL;
-
-    if (nbg_apply_to_page_range(nbg_init_mm, (unsigned long)area->addr,
-                                count * PAGE_SIZE, nbg_vmap_apply, &ctx)) {
-        nbg_free_vm_area(area);
-        return NULL;
-    }
-
-    return area->addr;
-}
-
-static void *nbg_phys_map(unsigned long phys, size_t size, pgprot_t prot)
-{
-    unsigned long phys_start = PAGE_ALIGN_START(phys);
-    unsigned long phys_end = PAGE_ALIGN_END(phys + size);
-    unsigned long count = (phys_end - phys_start) >> PAGE_SHIFT;
-    unsigned long offset = phys - phys_start;
-    unsigned long stack_pfns[NBG_STACK_PFN_COUNT];
-    unsigned long *pfns;
-    bool use_vmalloc = false;
-    void *mapped;
-    unsigned long i;
-
-    if (!count)
-        return NULL;
-
-    if (count <= NBG_STACK_PFN_COUNT) {
-        pfns = stack_pfns;
-    } else if (count <= NBG_KMALLOC_PFN_COUNT) {
-        pfns = kmalloc_array(count, sizeof(*pfns), GFP_KERNEL);
-        if (!pfns)
-            return NULL;
-    } else {
-        /* vmalloc_array 在 5.10 与 6.12 上分别是未知符号 / vmalloc_array_noprof，
-         * 直接引用会让模块在真机上加载失败；vmalloc 各版本都导出。 */
-        if (count > SIZE_MAX / sizeof(*pfns))
-            return NULL;
-        pfns = vmalloc(count * sizeof(*pfns));
-        if (!pfns)
-            return NULL;
-        use_vmalloc = true;
-    }
-
-    for (i = 0; i < count; i++)
-        pfns[i] = PHYS_PFN(phys_start) + i;
-
-    mapped = nbg_vmap_pfn(pfns, count, prot);
-
-    if (count > NBG_STACK_PFN_COUNT) {
-        if (use_vmalloc)
-            vfree(pfns);
-        else
-            kfree(pfns);
-    }
-
-    if (!mapped)
-        return NULL;
-
-    return (void *)((unsigned long)mapped + offset);
-}
-
-static void nbg_phys_unmap(void *mapped)
-{
-    vunmap((void *)PAGE_ALIGN_START((unsigned long)mapped));
-}
-
-static int nbg_linearmap_build_regions(void)
-{
-    struct memblock_type *memory = &nbg_memblock->memory;
-    pgprot_t prot = __pgprot(PROT_DEFAULT | PTE_PXN | PTE_UXN | PTE_WRITE |
-                             PTE_ATTRINDX(MT_NORMAL_NC));
-    unsigned long index = 0;
-    unsigned long i;
-
-    for (i = 0; i < memory->cnt; i++) {
-        struct memblock_region *region = &memory->regions[i];
-        void *mapped;
-
-        if (region->flags & MEMBLOCK_NOMAP)
-            continue;
-
-        if (g_linearmap[index].virt_nc) {
-            index++;
-            continue;
-        }
-
-        mapped = nbg_phys_map(region->base, region->size, prot);
-        if (!mapped) {
-            while (index > 0) {
-                index--;
-                if (g_linearmap[index].virt_nc) {
-                    nbg_phys_unmap((void *)g_linearmap[index].virt_nc);
-                    g_linearmap[index].virt_nc = 0;
-                }
-            }
-            return -EAGAIN;
-        }
-
-        g_linearmap[index].virt_nc = (unsigned long)mapped;
-        g_linearmap[index].phys = region->base;
-        g_linearmap[index].size = region->size;
-        index++;
-    }
-
-    return 0;
-}
-
-/* Caller must hold g_linearmap_lock for writing. */
-static void nbg_linearmap_destroy_locked(void)
-{
-    unsigned long i;
-
-    if (!g_linearmap)
+    if (!page)
         return;
-
-    for (i = 0; i < g_linearmap_count; i++) {
-        if (g_linearmap[i].virt_nc) {
-            nbg_phys_unmap((void *)g_linearmap[i].virt_nc);
-            g_linearmap[i].virt_nc = 0;
-        }
-    }
-
-    g_linearmap_ready = false;
-    kfree(g_linearmap);
-    g_linearmap = NULL;
-    g_linearmap_count = 0;
+    head = compound_head(page);
+    if (!page_ref_dec_and_test(head))
+        return;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+    __folio_put(page_folio(head));
+#else
+    __put_page(head);
+#endif
 }
 
-static int nbg_linearmap_build(void)
+NBG_NO_CFI
+static int nbg_call_fixup_user_fault(struct mm_struct *mm,
+                                     unsigned long address,
+                                     unsigned int flags, bool *unlocked)
 {
-    struct memblock_type *memory = &nbg_memblock->memory;
-    int ret = 0;
-    unsigned long i;
+    nbg_fixup_user_fault_t fn = READ_ONCE(nbg_fixup_user_fault_fn);
 
-    down_write(&g_linearmap_lock);
-
-    if (!g_linearmap_count) {
-        for (i = 0; i < memory->cnt; i++) {
-            if (!(memory->regions[i].flags & MEMBLOCK_NOMAP))
-                g_linearmap_count++;
-        }
-    }
-
-    if (!g_linearmap_count) {
-        up_write(&g_linearmap_lock);
-        return -ENOENT;
-    }
-
-    if (!g_linearmap) {
-        g_linearmap = kcalloc(g_linearmap_count, sizeof(*g_linearmap),
-                              GFP_KERNEL);
-        if (!g_linearmap) {
-            up_write(&g_linearmap_lock);
-            return -ENOMEM;
-        }
-    }
-
-    if (!g_linearmap_ready) {
-        ret = nbg_linearmap_build_regions();
-        if (ret)
-            nbg_linearmap_destroy_locked();
-        else
-            g_linearmap_ready = true;
-    }
-
-    up_write(&g_linearmap_lock);
-    return ret;
+    if (!fn)
+        return -ENOSYS;
+    return fn(mm, address, flags, unlocked);
 }
 
-static unsigned long nbg_phys_to_virt_nc(unsigned long phys)
+NBG_NO_CFI
+static bool nbg_call_flush_icache_range(unsigned long start,
+                                        unsigned long end)
 {
-    unsigned long result = 0;
-    unsigned long i;
+    nbg_flush_icache_range_t old_fn = READ_ONCE(nbg_flush_icache_range_fn);
+    nbg_caches_clean_inval_pou_t clean_fn =
+        READ_ONCE(nbg_caches_clean_inval_pou_fn);
+    nbg_kick_all_cpus_sync_t kick_fn = READ_ONCE(nbg_kick_all_cpus_sync_fn);
 
-    down_read(&g_linearmap_lock);
-
-    if (!g_linearmap || !g_linearmap_ready)
-        goto out;
-
-    for (i = 0; i < g_linearmap_count; i++) {
-        unsigned long base = g_linearmap[i].phys;
-        unsigned long size = g_linearmap[i].size;
-
-        if (phys >= base && phys < base + size) {
-            unsigned long virt = g_linearmap[i].virt_nc;
-
-            result = virt ? virt + (phys - base) : 0;
-            break;
-        }
+    if (old_fn) {
+        old_fn(start, end);
+        return true;
     }
-
-out:
-    up_read(&g_linearmap_lock);
-    return result;
-}
-
-static inline size_t nbg_size_inside_page(unsigned long addr, size_t count)
-{
-    size_t remain = PAGE_SIZE - (addr & ~PAGE_MASK);
-
-    return min(remain, count);
-}
-
-/* Walk the target page tables to a physical address. *size receives the
- * number of bytes still contiguous from this physical address within the
- * same mapping granule, so a large page yields one long run. */
-static unsigned long nbg_follow_phys(struct mm_struct *mm, unsigned long virt,
-                                     size_t *size)
-{
-    pgd_t *pgd;
-    p4d_t *p4d;
-    pud_t *pud;
-    pmd_t *pmd;
-    pte_t *pte;
-
-    pgd = pgd_offset(mm, virt);
-    if (pgd_none(*pgd) || pgd_bad(*pgd))
-        return ~0UL;
-
-    p4d = p4d_offset(pgd, virt);
-    if (p4d_none(*p4d) || p4d_bad(*p4d))
-        return ~0UL;
-
-    pud = pud_offset(p4d, virt);
-    if (pud_none(*pud))
-        return ~0UL;
-
-    if (pud_leaf(*pud)) {
-        unsigned long pfn = pud_pfn(*pud);
-        unsigned long phys;
-
-        if (!pfn)
-            return ~0UL;
-        if (size)
-            *size = PUD_SIZE - (virt & ~PUD_MASK);
-        phys = PFN_PHYS(pfn) | (virt & ~PUD_MASK);
-        if (phys > 0x400000000UL)
-            pr_err("nbg: walk pud virt=0x%lx entry=0x%llx pfn=0x%lx phys=0x%lx\n",
-                   virt, (unsigned long long)pud_val(*pud), pfn, phys);
-        return phys;
-    }
-
-    pmd = pmd_offset(pud, virt);
-    if (pmd_none(*pmd))
-        return ~0UL;
-
-    if (pmd_leaf(*pmd)) {
-        unsigned long pfn = pmd_pfn(*pmd);
-        unsigned long offset;
-        unsigned long granule;
-        phys_addr_t phys;
-
-        if (!pfn)
-            return ~0UL;
-
-        if (pmd_cont(*pmd)) {
-            unsigned long base_va = virt & CONT_PMD_MASK;
-            pmd_t *first = pmd_offset(pud, base_va);
-
-            granule = CONT_PMD_SIZE;
-            offset = virt & ~CONT_PMD_MASK;
-            phys = PFN_PHYS(pmd_pfn(*first)) + offset;
-        } else {
-            granule = pmd_leaf_size(*pmd);
-            offset = virt & ~PMD_MASK;
-            phys = PFN_PHYS(pfn) | offset;
-        }
-
-        if (size)
-            *size = granule - offset;
-        if (phys > 0x400000000UL)
-            pr_err("nbg: walk pmd virt=0x%lx entry=0x%llx pfn=0x%lx phys=0x%llx\n",
-                   virt, (unsigned long long)pmd_val(*pmd), pfn,
-                   (unsigned long long)phys);
-        return phys;
-    }
-
-    pte = pte_offset_kernel(pmd, virt);
-    if (!pte_present(*pte) || !pte_pfn(*pte)) {
-        pr_err_ratelimited("nbg: pte miss virt=0x%lx pte=0x%llx present=%d pfn=%d\n",
-                           virt, (unsigned long long)pte_val(*pte),
-                           pte_present(*pte) ? 1 : 0, pte_pfn(*pte) ? 1 : 0);
-        return ~0UL;
-    }
-
-    {
-        unsigned long pfn = pte_pfn(*pte);
-        unsigned long offset;
-        unsigned long granule;
-        phys_addr_t phys;
-
-        if (pte_cont(*pte)) {
-            unsigned long base_va = virt & CONT_PTE_MASK;
-            pte_t *first = pte_offset_kernel(pmd, base_va);
-
-            granule = CONT_PTE_SIZE;
-            offset = virt & ~CONT_PTE_MASK;
-            phys = PFN_PHYS(pte_pfn(*first)) + offset;
-        } else {
-            granule = PAGE_SIZE;
-            offset = virt & ~PAGE_MASK;
-            phys = PFN_PHYS(pfn) | offset;
-        }
-
-        if (size)
-            *size = granule - offset;
-        return phys;
-    }
-}
-
-/* DminLine: CTR_EL0[19:16]，最小 D/统一 cache 行长(log2 字数)。
- * DC CVAC 一次只清包含该 VA 的那一条 line，by-VA 循环步长必须用最小行长，
- * 否则在 cache_line_size()(最大行长/CWG) > DminLine 的 SoC 上会跳过中间行漏刷。 */
-static inline unsigned long nbg_dcache_min_line(void)
-{
-    unsigned long ctr;
-
-    asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
-    return 4UL << ((ctr >> 16) & 0xf);
-}
-
-/* Cache-maintenance variant: the target page may still have dirty lines in
- * some CPU's D-cache, so invalidate by VA on the cacheable alias before
- * reading the non-cacheable one. */
-static void nbg_dcache_invalidate(unsigned long phys, size_t len)
-{
-    unsigned long line = nbg_dcache_min_line();
-    unsigned long c_va = (unsigned long)phys_to_virt(phys);
-    unsigned long start = c_va & ~(line - 1);
-    unsigned long end = (c_va + len + line - 1) & ~(line - 1);
-    unsigned long va;
-
-    for (va = start; va < end; va += line)
-        asm volatile("dc cvac, %0" : : "r"(va) : "memory");
-    asm volatile("dsb sy" : : : "memory");
-}
-
-/* Read/write through the non-cacheable linearmap. Mirrors enkernel's
- * nc_memrw: one walker, one copy, direction chosen by `write`. */
-/* kvmalloc_array / vmalloc_array 在 6.10+ 会展开成 *_noprof 符号，而设备
- * 内核只导出旧名字；统一走 nbg_alloc.h 的版本适配层。 */
-static ssize_t nbg_nc_memrw(struct mm_struct *mm, unsigned long addr,
-                            char __user *buf, size_t count, int write)
-{
-    ssize_t copied = 0;
-
-    if (!mm)
-        return -EINVAL;
-
-    while (count > 0) {
-        size_t this_len = nbg_size_inside_page(addr, count);
-        unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
-        unsigned long virt;
-        size_t failed_len;
-
-        if (phys == ~0UL)
-            break;
-
-        this_len = min(this_len, count);
-
-        /* 跨设备 / 保留区的物理地址不归 linearmap 管，不做映射查找。 */
-        if (!pfn_valid(__phys_to_pfn(phys & PAGE_MASK))) {
-            pr_err_ratelimited("nbg: phys not in dram phys=0x%lx addr=0x%lx\n",
-                               phys, addr);
-            break;
-        }
-
-        virt = nbg_phys_to_virt_nc(phys);
-        if (!virt) {
-            pr_err_ratelimited("nbg: no nc mapping phys=0x%lx addr=0x%lx count=%lu\n",
-                               phys, addr, g_linearmap_count);
-            break;
-        }
-
-        if (!write) {
-            failed_len = copy_to_user(buf, (void *)virt, this_len);
-        } else {
-            failed_len = copy_from_user((void *)virt, buf, this_len);
-        }
-
-        if (failed_len) {
-            copied += this_len - failed_len;
-            break;
-        }
-
-        buf += this_len;
-        addr += this_len;
-        copied += this_len;
-        count -= this_len;
-    }
-
-    return copied;
-}
-
-/* GUP faults in each requested page and returns a short-lived page reference.
- * mmap_lock keeps the target VMA stable; the page reference prevents reclaim
- * or migration from recycling it before the bytes have been copied. */
-static int nbg_fault_read_mm(struct mm_struct *mm, unsigned long addr,
-                             void *buffer, size_t size, size_t *nbytes)
-{
-    size_t copied = 0;
-    u8 *output = buffer;
-    int ret = 0;
-
-    if (nbytes) *nbytes = 0;
-    if (!mm || !buffer || !size || !nbg_get_user_pages_remote_fn ||
-        !nbg_release_pages_fn)
-        return -EINVAL;
-
-    compat_mmap_read_lock(mm);
-    while (copied < size) {
-        struct page *page = NULL;
-        unsigned int flags = 0;
-        unsigned long current_addr = addr + copied;
-        size_t offset = offset_in_page(current_addr);
-        size_t bytes = min_t(size_t, size - copied, PAGE_SIZE - offset);
-        void *mapped;
-
-        ret = nbg_get_user_page_remote(mm, current_addr, flags, &page);
-        if (ret != 1) {
-            if (ret >= 0) ret = -EFAULT;
-            break;
-        }
-
-        mapped = compat_kmap_page(page);
-        memcpy(output + copied, (u8 *)mapped + offset, bytes);
-        compat_kunmap_page(mapped);
-        nbg_release_user_page(page);;
-        copied += bytes;
-        ret = 0;
-        if (!(copied & ((16U * PAGE_SIZE) - 1U)))
-            cond_resched();
-    }
-    compat_mmap_read_unlock(mm);
-    if (nbytes) *nbytes = copied;
-    return copied == size ? 0 : (ret ? ret : -EFAULT);
-}
-
-/* Cache-maintenance variant: invalidate the cacheable alias before the copy. */
-static ssize_t nbg_nc_memrw_cached(struct mm_struct *mm, unsigned long addr,
-                                   char __user *buf, size_t count, int write)
-{
-    ssize_t copied = 0;
-
-    if (!mm)
-        return -EINVAL;
-
-    while (count > 0) {
-        size_t this_len = nbg_size_inside_page(addr, count);
-        unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
-        unsigned long virt;
-        size_t failed_len;
-
-        if (phys == ~0UL)
-            break;
-
-        this_len = min(this_len, count);
-        virt = nbg_phys_to_virt_nc(phys);
-        if (!virt)
-            break;
-
-        nbg_dcache_invalidate(phys, this_len);
-
-        if (!write) {
-            failed_len = copy_to_user(buf, (void *)virt, this_len);
-        } else {
-            failed_len = copy_from_user((void *)virt, buf, this_len);
-        }
-
-        if (failed_len) {
-            copied += this_len - failed_len;
-            break;
-        }
-
-        buf += this_len;
-        addr += this_len;
-        copied += this_len;
-        count -= this_len;
-    }
-
-    return copied;
-}
-
-/* Kernel-buffer read used by in-module callers. */
-static ssize_t nbg_nc_read(struct mm_struct *mm, unsigned long addr,
-                           void *buffer, size_t count)
-{
-    char *out = buffer;
-    size_t copied = 0;
-
-    if (!mm)
-        return -EINVAL;
-
-    while (count > 0) {
-        size_t this_len = nbg_size_inside_page(addr, count);
-        unsigned long phys = nbg_follow_phys(mm, addr, &this_len);
-        unsigned long virt;
-
-        if (phys == ~0UL)
-            break;
-
-        this_len = min(this_len, count);
-        virt = nbg_phys_to_virt_nc(phys);
-        if (!virt)
-            break;
-
-        memcpy(out, (void *)virt, this_len);
-
-        out += this_len;
-        addr += this_len;
-        copied += this_len;
-        count -= this_len;
-    }
-
-    if (!copied)
-        return -EFAULT;
-    return copied;
-}
-
-static struct mm_struct *nbg_get_mm(pid_t pid, struct task_struct **task_out)
-{
-    struct task_struct *task;
-    struct mm_struct *mm;
-
-    if (pid <= 0)
-        return NULL;
-
-    rcu_read_lock();
-    task = pid_task(find_vpid(pid), PIDTYPE_PID);
-    if (task)
-        get_task_struct(task);
-    rcu_read_unlock();
-
-    if (!task)
-        return NULL;
-
-    mm = get_task_mm(task);
-    if (!mm) {
-        put_task_struct(task);
-        return NULL;
-    }
-
-    if (task_out)
-        *task_out = task;
-    else
-        put_task_struct(task);
-
-    return mm;
+    if (!clean_fn || !kick_fn)
+        return false;
+    clean_fn(start, end);
+    kick_fn();
+    return true;
 }
 
 int nbg_memory_init(void)
 {
-    nbg_get_vm_area_caller = (nbg_get_vm_area_caller_t)
-        generic_kallsyms_lookup_name("get_vm_area_caller");
-    nbg_apply_to_page_range = (nbg_apply_to_page_range_t)
-        generic_kallsyms_lookup_name("apply_to_page_range");
-    nbg_free_vm_area = (nbg_free_vm_area_t)
-        generic_kallsyms_lookup_name("free_vm_area");
-    nbg_init_mm = (struct mm_struct *)generic_kallsyms_lookup_name("init_mm");
-    nbg_get_user_pages_remote_fn = (nbg_get_user_pages_remote_t)
-        generic_kallsyms_lookup_name("get_user_pages_remote");
-    nbg_release_pages_fn = (nbg_release_pages_t)
-        generic_kallsyms_lookup_name("release_pages");
-    nbg_memblock = (struct memblock *)generic_kallsyms_lookup_name("memblock");
+    unsigned long addr;
 
-    if (!nbg_memblock)
+    nbg_kernel_zero_pfn =
+        (unsigned long *)generic_kallsyms_lookup_name("zero_pfn");
+    if (!nbg_kernel_zero_pfn)
         return -ENOENT;
 
-    init_rwsem(&g_linearmap_lock);
+    addr = generic_kallsyms_lookup_name("fixup_user_fault");
+    if (!addr)
+        return -ENOENT;
 
-    {
-        int lr = nbg_linearmap_build();
-
-        pr_err("nbg: linearmap ret=%d count=%lu ready=%d\n", lr,
-               g_linearmap_count, g_linearmap_ready ? 1 : 0);
-        if (g_linearmap_count && g_linearmap) {
-            unsigned long i;
-
-            for (i = 0; i < g_linearmap_count; i++)
-                pr_err("nbg: lm[%lu] phys=0x%lx size=0x%lx virt=0x%lx\n",
-                       i, g_linearmap[i].phys, g_linearmap[i].size,
-                       g_linearmap[i].virt_nc);
-        }
-        return lr;
+    WRITE_ONCE(nbg_fixup_user_fault_fn, (nbg_fixup_user_fault_t)addr);
+    /* Optional on older kernels: keep module loading independent of this
+     * helper while enabling reliable remote text patches where available. */
+    addr = generic_kallsyms_lookup_name("__flush_icache_range");
+    if (!addr)
+        addr = generic_kallsyms_lookup_name("flush_icache_range");
+    WRITE_ONCE(nbg_flush_icache_range_fn,
+               (nbg_flush_icache_range_t)addr);
+    if (!addr) {
+        WRITE_ONCE(nbg_caches_clean_inval_pou_fn,
+                   (nbg_caches_clean_inval_pou_t)
+                       generic_kallsyms_lookup_name("caches_clean_inval_pou"));
+        WRITE_ONCE(nbg_kick_all_cpus_sync_fn,
+                   (nbg_kick_all_cpus_sync_t)
+                       generic_kallsyms_lookup_name("kick_all_cpus_sync"));
     }
+    return 0;
 }
 
-/* 仅在模块退出时调用：linearmap 是模块级资源，不随客户端断开销毁。 */
-void nbg_memory_exit(void)
+static void nbg_target_cache_drop_locked(void)
 {
-    down_write(&g_linearmap_lock);
-    nbg_linearmap_destroy_locked();
-    up_write(&g_linearmap_lock);
+    struct task_struct *task;
+    struct pid *pid_ref;
+
+    task = nbg_cached_task;
+    pid_ref = nbg_cached_pid_ref;
+
+    nbg_cached_pid_ref = NULL;
+    nbg_cached_task = NULL;
+    nbg_cached_expires = 0;
+
+    if (task)
+        put_task_struct(task);
+    if (pid_ref)
+        put_pid(pid_ref);
+}
+
+static unsigned long nbg_remote_task_size_limit(void)
+{
+#ifdef TASK_SIZE_MAX
+    return TASK_SIZE_MAX;
+#elif defined(TASK_SIZE_64)
+    return TASK_SIZE_64;
+#else
+    return TASK_SIZE;
+#endif
+}
+
+static int nbg_normalize_remote_range(uintptr_t remote_addr, size_t size,
+                                      unsigned long *start_out)
+{
+    unsigned long start;
+    unsigned long limit;
+
+    if (!remote_addr || !size)
+        return -EINVAL;
+
+    start = untagged_addr((unsigned long)remote_addr);
+    limit = nbg_remote_task_size_limit();
+    if (!start || start >= limit || size > limit - start)
+        return -EINVAL;
+
+    if (start_out)
+        *start_out = start;
+    return 0;
+}
+
+static int nbg_validate_user_range(uintptr_t user_addr, size_t size)
+{
+    unsigned long start;
+
+    if (!user_addr || !size)
+        return -EINVAL;
+
+    start = (unsigned long)user_addr;
+    if (size - 1 > ULONG_MAX - start)
+        return -EINVAL;
+    if (!access_ok((void __user *)start, size))
+        return -EFAULT;
+    return 0;
+}
+
+static int get_target_mm_cached(pid_t pid_nr, struct mm_struct **out)
+{
+    struct pid *pid_ref;
+    struct task_struct *task;
+    struct mm_struct *mm;
+    bool alive;
+
+    if (!out || pid_nr <= 0)
+        return -EINVAL;
+    *out = NULL;
+
+    if (in_atomic() || irqs_disabled())
+        return -EBUSY;
+
+    pid_ref = find_get_pid(pid_nr);
+    if (!pid_ref)
+        return -ESRCH;
+
+    mutex_lock(&nbg_mm_cache_lock);
+
+    if (nbg_cached_pid_ref == pid_ref && nbg_cached_task) {
+        alive = pid_alive(nbg_cached_task) &&
+                !(READ_ONCE(nbg_cached_task->flags) & PF_EXITING);
+        if (alive && time_before(jiffies, nbg_cached_expires)) {
+            mm = get_task_mm(nbg_cached_task);
+            if (mm) {
+                nbg_cached_expires = jiffies + NBG_MM_CACHE_TTL;
+                *out = mm;
+                mutex_unlock(&nbg_mm_cache_lock);
+                put_pid(pid_ref);
+                return 0;
+            }
+        }
+        nbg_target_cache_drop_locked();
+    } else if (nbg_cached_pid_ref) {
+        nbg_target_cache_drop_locked();
+    }
+
+    task = get_pid_task(pid_ref, PIDTYPE_PID);
+    if (!task) {
+        mutex_unlock(&nbg_mm_cache_lock);
+        put_pid(pid_ref);
+        return -ESRCH;
+    }
+
+    if (READ_ONCE(task->flags) & PF_EXITING) {
+        mutex_unlock(&nbg_mm_cache_lock);
+        put_task_struct(task);
+        put_pid(pid_ref);
+        return -ESRCH;
+    }
+
+    mm = get_task_mm(task);
+    if (!mm) {
+        mutex_unlock(&nbg_mm_cache_lock);
+        put_task_struct(task);
+        put_pid(pid_ref);
+        return -ESRCH;
+    }
+
+    nbg_cached_pid_ref = pid_ref;
+    nbg_cached_task = task;
+    nbg_cached_expires = jiffies + NBG_MM_CACHE_TTL;
+    *out = mm;
+
+    mutex_unlock(&nbg_mm_cache_lock);
+    return 0;
+}
+
+void nbg_memory_cache_cleanup(void)
+{
+    mutex_lock(&nbg_mm_cache_lock);
+    nbg_target_cache_drop_locked();
+    mutex_unlock(&nbg_mm_cache_lock);
+}
+
+/* Caller holds mm->mmap_lock for reading. The page-table entry is protected
+ * while a transient page reference is acquired, so migration/unmap cannot
+ * leave the copy path using a recycled PFN. This is a direct PTE lookup and
+ * never faults a missing page in. */
+static int nbg_pte_get_present_page_locked(struct mm_struct *mm,
+                                           unsigned long addr,
+                                           struct page **page_out,
+                                           bool allow_zero_page)
+{
+    struct vm_area_struct *vma;
+    struct page *page;
+    spinlock_t *ptl;
+    unsigned long pfn;
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *ptep;
+    pgd_t pgdval;
+    p4d_t p4dval;
+    pud_t pudval;
+    pmd_t pmdval;
+    pte_t pteval;
+
+    if (!mm || !page_out)
+        return -EINVAL;
+    *page_out = NULL;
+
+    vma = find_vma(mm, addr);
+    if (!vma || addr < vma->vm_start)
+        return -EFAULT;
+
+    pgd = pgd_offset(mm, addr);
+    pgdval = READ_ONCE(*pgd);
+    if (pgd_none(pgdval) || pgd_bad(pgdval))
+        return -EFAULT;
+
+    p4d = p4d_offset(pgd, addr);
+    p4dval = READ_ONCE(*p4d);
+    if (p4d_none(p4dval) || p4d_bad(p4dval))
+        return -EFAULT;
+
+    pud = pud_offset(p4d, addr);
+    pudval = READ_ONCE(*pud);
+    if (pud_none(pudval))
+        return -EFAULT;
+    if (pud_leaf(pudval)) {
+        ptl = pud_lock(mm, pud);
+        pudval = READ_ONCE(*pud);
+        if (!pud_leaf(pudval) || !pud_present(pudval) || compat_pud_devmap(pudval)) {
+            spin_unlock(ptl);
+            return -EAGAIN;
+        }
+
+        pfn = pud_pfn(pudval) + ((addr & ~PUD_MASK) >> PAGE_SHIFT);
+        if (!pfn_valid(pfn)) {
+            spin_unlock(ptl);
+            return -EFAULT;
+        }
+        page = pfn_to_page(pfn);
+        if (!nbg_page_ref_try_get(page)) {
+            spin_unlock(ptl);
+            return -EAGAIN;
+        }
+        spin_unlock(ptl);
+        *page_out = page;
+        return 0;
+    }
+    if (pud_bad(pudval))
+        return -EFAULT;
+
+    pmd = pmd_offset(pud, addr);
+    pmdval = READ_ONCE(*pmd);
+    if (pmd_none(pmdval))
+        return -EFAULT;
+    if (pmd_leaf(pmdval)) {
+        ptl = pmd_lock(mm, pmd);
+        pmdval = READ_ONCE(*pmd);
+        if (!pmd_leaf(pmdval) || !pmd_present(pmdval) || compat_pmd_devmap(pmdval)) {
+            spin_unlock(ptl);
+            return -EAGAIN;
+        }
+
+        pfn = pmd_pfn(pmdval) + ((addr & ~PMD_MASK) >> PAGE_SHIFT);
+        if (!pfn_valid(pfn)) {
+            spin_unlock(ptl);
+            return -EFAULT;
+        }
+        page = pfn_to_page(pfn);
+        if (!nbg_page_ref_try_get(page)) {
+            spin_unlock(ptl);
+            return -EAGAIN;
+        }
+        spin_unlock(ptl);
+        *page_out = page;
+        return 0;
+    }
+    if (pmd_bad(pmdval))
+        return -EFAULT;
+
+    ptep = pte_offset_map_lock(mm, pmd, addr, &ptl);
+    if (!ptep)
+        return -EAGAIN;
+
+    pteval = READ_ONCE(*ptep);
+    if (!pte_present(pteval) || compat_pte_devmap(pteval)) {
+        pte_unmap_unlock(ptep, ptl);
+        return -EFAULT;
+    }
+
+    pfn = pte_pfn(pteval);
+    if (pte_special(pteval) && (!allow_zero_page || !nbg_is_zero_pfn(pfn))) {
+        pte_unmap_unlock(ptep, ptl);
+        return -EFAULT;
+    }
+    if (!pfn_valid(pfn)) {
+        pte_unmap_unlock(ptep, ptl);
+        return -EFAULT;
+    }
+    page = pfn_to_page(pfn);
+    if (!nbg_page_ref_try_get(page)) {
+        pte_unmap_unlock(ptep, ptl);
+        return -EAGAIN;
+    }
+
+    pte_unmap_unlock(ptep, ptl);
+    *page_out = page;
+    return 0;
+}
+
+static int nbg_remote_read_kernel_pte_mm(struct mm_struct *mm,
+                                         unsigned long remote_start,
+                                         void *buffer, size_t size,
+                                         size_t *nbytes)
+{
+    unsigned long current_addr;
+    size_t remaining;
+    size_t done;
+    u8 *out;
+    int ret;
+
+    if (nbytes)
+        *nbytes = 0;
+    if (!mm || !buffer || !size)
+        return -EINVAL;
+
+    current_addr = remote_start;
+    remaining = size;
+    done = 0;
+    out = buffer;
+    ret = 0;
+
+    compat_mmap_read_lock(mm);
+    while (remaining) {
+        struct page *page;
+        size_t offset;
+        size_t chunk;
+        void *mapped;
+
+        ret = nbg_pte_get_present_page_locked(mm, current_addr, &page, true);
+        if (ret)
+            break;
+
+        offset = current_addr & ~PAGE_MASK;
+        chunk = min_t(size_t, remaining, PAGE_SIZE - offset);
+        mapped = compat_kmap_page(page);
+        memcpy(out + done, (u8 *)mapped + offset, chunk);
+        compat_kunmap_page(mapped);
+        nbg_page_ref_put(page);
+
+        current_addr += chunk;
+        remaining -= chunk;
+        done += chunk;
+        if (!(done & ((16U * PAGE_SIZE) - 1U)))
+            cond_resched();
+    }
+    compat_mmap_read_unlock(mm);
+
+    if (nbytes)
+        *nbytes = done;
+    if (ret)
+        return ret;
+    return done == size ? 0 : -EFAULT;
+}
+
+/* mmap_lock is held for read on entry and remains held on every return. */
+static int nbg_fault_in_remote_page_locked(struct mm_struct *mm,
+                                           unsigned long address)
+{
+    unsigned int fault_flags = 0;
+    bool unlocked = false;
+
+    if (mm != current->mm)
+        fault_flags |= FAULT_FLAG_REMOTE;
+    return nbg_call_fixup_user_fault(mm, address, fault_flags, &unlocked);
+}
+
+static int nbg_remote_read_kernel_fault_mm(struct mm_struct *mm,
+                                           unsigned long remote_start,
+                                           void *buffer, size_t size,
+                                           size_t *nbytes)
+{
+    unsigned long current_addr;
+    size_t remaining;
+    size_t done;
+    u8 *out;
+    int ret;
+
+    if (nbytes)
+        *nbytes = 0;
+    if (!mm || !buffer || !size)
+        return -EINVAL;
+
+    current_addr = remote_start;
+    remaining = size;
+    done = 0;
+    out = buffer;
+    ret = 0;
+
+    compat_mmap_read_lock(mm);
+    while (remaining) {
+        struct page *page;
+        size_t offset;
+        size_t chunk;
+        void *mapped;
+        unsigned int pte_retries;
+        bool fault_attempted;
+
+        pte_retries = 0;
+        fault_attempted = false;
+retry_pte:
+        ret = nbg_pte_get_present_page_locked(mm, current_addr, &page, true);
+        if (ret == -EAGAIN && pte_retries++ < 2) {
+            cond_resched();
+            goto retry_pte;
+        }
+        if (ret == -EFAULT && !fault_attempted) {
+            fault_attempted = true;
+            ret = nbg_fault_in_remote_page_locked(mm, current_addr);
+            if (!ret)
+                goto retry_pte;
+        }
+        if (ret)
+            break;
+
+        offset = current_addr & ~PAGE_MASK;
+        chunk = min_t(size_t, remaining, PAGE_SIZE - offset);
+        mapped = compat_kmap_page(page);
+        memcpy(out + done, (u8 *)mapped + offset, chunk);
+        compat_kunmap_page(mapped);
+        nbg_page_ref_put(page);
+
+        current_addr += chunk;
+        remaining -= chunk;
+        done += chunk;
+        if (!(done & ((16U * PAGE_SIZE) - 1U)))
+            cond_resched();
+    }
+    compat_mmap_read_unlock(mm);
+
+    if (nbytes)
+        *nbytes = done;
+    if (ret)
+        return ret;
+    return done == size ? 0 : -EFAULT;
+}
+
+static int nbg_remote_read_user_pte_mm(struct mm_struct *mm,
+                                       unsigned long remote_start,
+                                       uintptr_t user_addr, size_t size,
+                                       size_t *nbytes)
+{
+    unsigned long current_addr;
+    uintptr_t current_user;
+    size_t remaining;
+    size_t done;
+    u8 tmp[NBG_READ_STACK_CHUNK];
+    int ret;
+
+    if (nbytes)
+        *nbytes = 0;
+    ret = nbg_validate_user_range(user_addr, size);
+    if (ret)
+        return ret;
+
+    current_addr = remote_start;
+    current_user = user_addr;
+    remaining = size;
+    done = 0;
+    ret = 0;
+
+    while (remaining) {
+        size_t want;
+        size_t got;
+
+        want = min_t(size_t, remaining, sizeof(tmp));
+        got = 0;
+        ret = nbg_remote_read_kernel_pte_mm(mm, current_addr, tmp, want,
+                                            &got);
+        if (got && copy_to_user((void __user *)current_user, tmp, got)) {
+            ret = -EFAULT;
+            break;
+        }
+
+        current_addr += got;
+        current_user += got;
+        remaining -= got;
+        done += got;
+        if (ret || got != want)
+            break;
+    }
+
+    if (nbytes)
+        *nbytes = done;
+    if (ret)
+        return ret;
+    return done == size ? 0 : -EFAULT;
+}
+
+static int nbg_remote_read_user_fault_mm(struct mm_struct *mm,
+                                         unsigned long remote_start,
+                                         uintptr_t user_addr, size_t size,
+                                         size_t *nbytes)
+{
+    unsigned long current_addr;
+    uintptr_t current_user;
+    size_t remaining;
+    size_t done;
+    u8 tmp[NBG_READ_STACK_CHUNK];
+    int ret;
+
+    if (nbytes)
+        *nbytes = 0;
+    ret = nbg_validate_user_range(user_addr, size);
+    if (ret)
+        return ret;
+
+    current_addr = remote_start;
+    current_user = user_addr;
+    remaining = size;
+    done = 0;
+    ret = 0;
+
+    while (remaining) {
+        size_t want;
+        size_t got;
+
+        want = min_t(size_t, remaining, sizeof(tmp));
+        got = 0;
+        ret = nbg_remote_read_kernel_fault_mm(mm, current_addr, tmp, want,
+                                              &got);
+        if (got && copy_to_user((void __user *)current_user, tmp, got)) {
+            ret = -EFAULT;
+            break;
+        }
+
+        current_addr += got;
+        current_user += got;
+        remaining -= got;
+        done += got;
+        if (ret || got != want)
+            break;
+    }
+
+    if (nbytes)
+        *nbytes = done;
+    if (ret)
+        return ret;
+    return done == size ? 0 : -EFAULT;
+}
+
+static int nbg_remote_write_kernel_pte_mm(struct mm_struct *mm,
+                                          unsigned long remote_start,
+                                          const void *buffer, size_t size,
+                                          size_t *nbytes)
+{
+    unsigned long current_addr;
+    size_t remaining;
+    size_t done;
+    const u8 *in;
+    int ret;
+
+    if (nbytes)
+        *nbytes = 0;
+    if (!mm || !buffer || !size)
+        return -EINVAL;
+
+    current_addr = remote_start;
+    remaining = size;
+    done = 0;
+    in = buffer;
+    ret = 0;
+
+    compat_mmap_read_lock(mm);
+    while (remaining) {
+        struct page *page;
+        size_t offset;
+        size_t chunk;
+        void *mapped;
+
+        ret = nbg_pte_get_present_page_locked(mm, current_addr, &page, false);
+        if (ret)
+            break;
+
+        offset = current_addr & ~PAGE_MASK;
+        chunk = min_t(size_t, remaining, PAGE_SIZE - offset);
+        mapped = compat_kmap_page(page);
+        memcpy((u8 *)mapped + offset, in + done, chunk);
+        compat_kunmap_page(mapped);
+        flush_dcache_page(page);
+        set_page_dirty_lock(page);
+        nbg_page_ref_put(page);
+
+        current_addr += chunk;
+        remaining -= chunk;
+        done += chunk;
+        if (!(done & ((16U * PAGE_SIZE) - 1U)))
+            cond_resched();
+    }
+    compat_mmap_read_unlock(mm);
+
+    if (nbytes)
+        *nbytes = done;
+    if (ret)
+        return ret;
+    return done == size ? 0 : -EFAULT;
 }
 
 bool read_process_memory_mm(struct mm_struct *mm, uintptr_t addr,
                             void *buffer, size_t size)
 {
-    ssize_t ret;
+    unsigned long remote_start;
+    size_t done;
+    int ret;
 
-    if (!mm || !buffer || !size)
+    if (!mm || !buffer || !size || size > NBG_MAX_RW_SIZE)
+        return false;
+    if (in_atomic() || irqs_disabled())
         return false;
 
-    ret = nbg_nc_read(mm, (unsigned long)addr, buffer, size);
-    return ret == (ssize_t)size;
+    ret = nbg_normalize_remote_range(addr, size, &remote_start);
+    if (ret)
+        return false;
+
+    ret = nbg_remote_read_kernel_pte_mm(mm, remote_start, buffer, size,
+                                        &done);
+    return ret == 0 && done == size;
 }
 
-/* Write into the target through the same NC linearmap. */
+bool read_process_memory_kernel(pid_t pid, uintptr_t addr,
+                                void *buffer, size_t size)
+{
+    struct mm_struct *mm;
+    unsigned long remote_start;
+    size_t done;
+    int ret;
+
+    if (!buffer || !size || size > NBG_MAX_RW_SIZE)
+        return false;
+    if (in_atomic() || irqs_disabled())
+        return false;
+
+    ret = nbg_normalize_remote_range(addr, size, &remote_start);
+    if (ret)
+        return false;
+
+    ret = get_target_mm_cached(pid, &mm);
+    if (ret)
+        return false;
+
+    ret = nbg_remote_read_kernel_pte_mm(mm, remote_start, buffer, size,
+                                        &done);
+    mmput(mm);
+    return ret == 0 && done == size;
+}
+
 bool write_process_memory_kernel(pid_t pid, uintptr_t addr,
                                  const void *buffer, size_t size)
 {
-    struct task_struct *task = NULL;
     struct mm_struct *mm;
-    size_t copied = 0;
+    unsigned long remote_start;
+    size_t done;
+    int ret;
 
-    if (!buffer || !size)
+    if (!buffer || !size || size > NBG_MAX_RW_SIZE)
+        return false;
+    if (in_atomic() || irqs_disabled())
         return false;
 
-    mm = nbg_get_mm(pid, &task);
-    if (!mm)
+    ret = nbg_normalize_remote_range(addr, size, &remote_start);
+    if (ret)
         return false;
 
-    {
-        const char *in = buffer;
-        unsigned long cur = (unsigned long)addr;
-        size_t left = size;
+    ret = get_target_mm_cached(pid, &mm);
+    if (ret)
+        return false;
 
-        while (left > 0) {
-            size_t this_len = nbg_size_inside_page(cur, left);
-            unsigned long phys = nbg_follow_phys(mm, cur, &this_len);
-            unsigned long virt;
-
-            if (phys == ~0UL)
-                break;
-
-            this_len = min(this_len, left);
-            virt = nbg_phys_to_virt_nc(phys);
-            if (!virt)
-                break;
-
-            memcpy((void *)virt, in, this_len);
-            nbg_dcache_invalidate(phys, this_len);
-
-            in += this_len;
-            cur += this_len;
-            copied += this_len;
-            left -= this_len;
-        }
-    }
-
+    ret = nbg_remote_write_kernel_pte_mm(mm, remote_start, buffer, size,
+                                         &done);
     mmput(mm);
-    if (task)
-        put_task_struct(task);
-
-    return copied == size;
+    return ret == 0 && done == size;
 }
 
-bool read_process_memory_kernel(pid_t pid, uintptr_t addr, void *buffer,
-                                size_t size)
+static int rw_process_memory_user(pid_t pid, uintptr_t remote_addr,
+                                  uintptr_t user_addr, size_t size,
+                                  size_t *nbytes, bool write_remote)
 {
-    struct task_struct *task = NULL;
     struct mm_struct *mm;
-    ssize_t ret;
-
-    if (!buffer || !size)
-        return false;
-
-    mm = nbg_get_mm(pid, &task);
-    if (!mm)
-        return false;
-
-    ret = nbg_nc_read(mm, (unsigned long)addr, buffer, size);
-
-    mmput(mm);
-    if (task)
-        put_task_struct(task);
-
-    return ret == (ssize_t)size;
-}
-
-/* Shared ioctl bridge: remote <-> user buffer, direction and cache policy
- * selected by the caller. Mirrors enkernel's access_remote_vm_nc{, _cache}. */
-static int nbg_rw_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
-                         size_t size, size_t *nbytes, bool write,
-                         bool cache_flush)
-{
-    struct task_struct *task = NULL;
-    struct mm_struct *mm;
-    ssize_t ret;
+    void *kbuf;
+    unsigned long remote_start;
+    size_t done;
+    int ret;
 
     if (nbytes)
         *nbytes = 0;
-    if (!user_addr || !size || size > NBG_READ_MAX)
+    if (pid <= 0 || !remote_addr || !user_addr || !size)
         return -EINVAL;
+    if (size > NBG_MAX_RW_SIZE)
+        return -EMSGSIZE;
+    ret = nbg_normalize_remote_range(remote_addr, size, &remote_start);
+    if (ret)
+        return ret;
+    ret = nbg_validate_user_range(user_addr, size);
+    if (ret)
+        return ret;
+    if (in_atomic() || irqs_disabled())
+        return -EBUSY;
 
-    mm = nbg_get_mm(pid, &task);
-    if (!mm)
-        return -ESRCH;
+    kbuf = kvmalloc(size, GFP_KERNEL);
+    if (!kbuf)
+        return -ENOMEM;
 
-    if (cache_flush)
-        ret = nbg_nc_memrw_cached(mm, (unsigned long)remote_addr,
-                                  (char __user *)user_addr, size, write);
-    else
-        ret = nbg_nc_memrw(mm, (unsigned long)remote_addr,
-                           (char __user *)user_addr, size, write);
+    if (write_remote && copy_from_user(kbuf, (void __user *)user_addr, size)) {
+        kvfree(kbuf);
+        return -EFAULT;
+    }
 
-    if (ret < 0)
-        pr_err_ratelimited("nbg: rw pid=%d addr=0x%lx size=%zu w=%d ret=%zd linearmap=%d/%lu mm=%px cur=%px pgd=%px\n",
-                           pid, (unsigned long)remote_addr, size, write, ret,
-                           g_linearmap_ready ? 1 : 0, g_linearmap_count,
-                           mm, current->mm, (void *)mm->pgd);
+    ret = get_target_mm_cached(pid, &mm);
+    if (ret) {
+        kvfree(kbuf);
+        return ret;
+    }
 
+    done = 0;
+    if (write_remote) {
+        ret = nbg_remote_write_kernel_pte_mm(mm, remote_start, kbuf, size,
+                                             &done);
+    } else {
+        ret = nbg_remote_read_kernel_pte_mm(mm, remote_start, kbuf, size,
+                                            &done);
+    }
     mmput(mm);
-    if (task)
-        put_task_struct(task);
+
+    if (!write_remote && ret == 0 && copy_to_user((void __user *)user_addr,
+                                                  kbuf, size)) {
+        done = 0;
+        ret = -EFAULT;
+    }
+
+    kvfree(kbuf);
+    if (nbytes)
+        *nbytes = done;
+    return ret;
+}
+
+static int read_process_memory_user_fast(pid_t pid, uintptr_t remote_addr,
+                                         uintptr_t user_addr, size_t size,
+                                         size_t *nbytes)
+{
+    struct mm_struct *mm;
+    unsigned long remote_start;
+    size_t done;
+    int ret;
 
     if (nbytes)
-        *nbytes = ret > 0 ? (size_t)ret : 0;
-    if (ret < 0)
-        return (int)ret;
-    return ret == (ssize_t)size ? 0 : -EFAULT;
+        *nbytes = 0;
+    if (pid <= 0 || !remote_addr || !user_addr || !size)
+        return -EINVAL;
+    if (size > NBG_MAX_RW_SIZE)
+        return -EMSGSIZE;
+    ret = nbg_normalize_remote_range(remote_addr, size, &remote_start);
+    if (ret)
+        return ret;
+    ret = nbg_validate_user_range(user_addr, size);
+    if (ret)
+        return ret;
+    if (in_atomic() || irqs_disabled())
+        return -EBUSY;
+
+    ret = get_target_mm_cached(pid, &mm);
+    if (ret)
+        return ret;
+
+    if (mm == current->mm) {
+        mmput(mm);
+        return rw_process_memory_user(pid, remote_addr, user_addr, size,
+                                      nbytes, false);
+    }
+
+    done = 0;
+    ret = nbg_remote_read_user_pte_mm(mm, remote_start, user_addr, size,
+                                      &done);
+    mmput(mm);
+
+    if (nbytes)
+        *nbytes = done;
+    return ret;
+}
+
+static int read_process_memory_user_fault(pid_t pid, uintptr_t remote_addr,
+                                          uintptr_t user_addr, size_t size,
+                                          size_t *nbytes)
+{
+    struct mm_struct *mm;
+    unsigned long remote_start;
+    size_t done;
+    int ret;
+
+    if (nbytes)
+        *nbytes = 0;
+    if (pid <= 0 || !remote_addr || !user_addr || !size)
+        return -EINVAL;
+    if (size > NBG_MAX_RW_SIZE)
+        return -EMSGSIZE;
+    ret = nbg_normalize_remote_range(remote_addr, size, &remote_start);
+    if (ret)
+        return ret;
+    ret = nbg_validate_user_range(user_addr, size);
+    if (ret)
+        return ret;
+    if (in_atomic() || irqs_disabled())
+        return -EBUSY;
+
+    ret = get_target_mm_cached(pid, &mm);
+    if (ret)
+        return ret;
+
+    done = 0;
+    ret = nbg_remote_read_user_fault_mm(mm, remote_start, user_addr, size,
+                                        &done);
+    mmput(mm);
+
+    if (nbytes)
+        *nbytes = done;
+    return ret;
 }
 
 int nbg_read_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
                     size_t size, size_t *nbytes)
 {
-    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, false,
-                         false);
+    return read_process_memory_user_fast(pid, remote_addr, user_addr,
+                                         size, nbytes);
 }
 
 int nbg_read_memory_fault(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
                           size_t size, size_t *nbytes)
 {
-    struct task_struct *task = NULL;
-    struct mm_struct *mm;
-    void *buffer;
-    size_t copied = 0;
-    int ret;
-
-    if (nbytes) *nbytes = 0;
-    if (pid <= 0 || !remote_addr || !user_addr || !size ||
-        size > NBG_MAX_RW_SIZE || remote_addr + size < remote_addr)
-        return -EINVAL;
-    if (in_atomic() || irqs_disabled())
-        return -EBUSY;
-    buffer = nbg_kvmalloc(size, GFP_KERNEL);
-    if (!buffer)
-        return -ENOMEM;
-    mm = nbg_get_mm(pid, &task);
-    if (!mm) {
-        kvfree(buffer);
-        return -ESRCH;
-    }
-    ret = nbg_fault_read_mm(mm, (unsigned long)remote_addr, buffer, size,
-                            &copied);
-    mmput(mm);
-    if (task) put_task_struct(task);
-    if (!ret && copy_to_user((void __user *)user_addr, buffer, size)) {
-        ret = -EFAULT;
-        copied = 0;
-    }
-    kvfree(buffer);
-    if (nbytes) *nbytes = copied;
-    return ret;
-}
-
-/* Cache-maintenance read: invalidate the cacheable alias before copying from
- * the NC mapping, for pages that may still be dirty in some CPU's D-cache. */
-int nbg_read_memory_cache(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
-                          size_t size, size_t *nbytes)
-{
-    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, false,
-                         true);
+    return read_process_memory_user_fault(pid, remote_addr, user_addr,
+                                          size, nbytes);
 }
 
 int nbg_write_memory(pid_t pid, uintptr_t remote_addr, uintptr_t user_addr,
                      size_t size, size_t *nbytes)
 {
-    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, true,
-                         false);
+    return rw_process_memory_user(pid, remote_addr, user_addr, size,
+                                  nbytes, true);
 }
 
-int nbg_write_memory_cache(pid_t pid, uintptr_t remote_addr,
-                           uintptr_t user_addr, size_t size, size_t *nbytes)
+int nbg_flush_icache(pid_t pid, uintptr_t remote_addr, size_t size)
 {
-    return nbg_rw_memory(pid, remote_addr, user_addr, size, nbytes, true,
-                         true);
-}
-
-/* ---- 可复用的 mm 上下文 ---- */
-
-int nbg_read_ctx_init_pid(struct nbg_read_ctx *ctx, pid_t pid)
-{
-    struct task_struct *task;
-    struct mm_struct *mm;
-
-    if (!ctx || pid <= 0)
-        return -EINVAL;
-
-    ctx->pid = 0;
-    ctx->mm = NULL;
-
-    rcu_read_lock();
-    task = pid_task(find_vpid(pid), PIDTYPE_PID);
-    if (task)
-        get_task_struct(task);
-    rcu_read_unlock();
-    if (!task)
-        return -ESRCH;
-
-    mm = get_task_mm(task);
-    put_task_struct(task);
-    if (!mm)
-        return -EINVAL;
-
-    ctx->pid = pid;
-    ctx->mm = mm;
-    return 0;
-}
-
-int nbg_read_ctx_init_current(struct nbg_read_ctx *ctx, pid_t expected_tgid)
-{
-    struct mm_struct *mm;
-
-    if (!ctx || expected_tgid <= 0)
-        return -EINVAL;
-
-    ctx->pid = 0;
-    ctx->mm = NULL;
-
-    if (current->tgid != expected_tgid)
-        return -ESRCH;
-
-    mm = get_task_mm(current);
-    if (!mm)
-        return -EINVAL;
-
-    ctx->pid = expected_tgid;
-    ctx->mm = mm;
-    return 0;
-}
-
-long nbg_read_ctx_read(struct nbg_read_ctx *ctx, uint64_t addr, void *buf,
-                       size_t size)
-{
-    ssize_t ret;
-
-    if (!ctx || !ctx->mm || !buf)
-        return -EINVAL;
-    if (size == 0 || size > NBG_READ_MAX)
-        return -EINVAL;
-
-    ret = nbg_nc_read(ctx->mm, (unsigned long)addr, buf, size);
-    if (ret < 0)
-        return ret;
-    if ((uint64_t)ret != size)
-        return -EFAULT;
-
-    return 0;
-}
-
-void nbg_read_ctx_release(struct nbg_read_ctx *ctx)
-{
-    if (!ctx)
-        return;
-    if (ctx->mm)
-        mmput(ctx->mm);
-    ctx->pid = 0;
-    ctx->mm = NULL;
-}
-
-long nbg_read_kernel(pid_t pid, uint64_t addr, void *buf, size_t size)
-{
-    struct nbg_read_ctx ctx;
-    long ret;
-
-    ret = nbg_read_ctx_init_pid(&ctx, pid);
+    unsigned long start;
+    unsigned long end;
+    int ret;
+    if (pid <= 0 || !size || size > NBG_MAX_RW_SIZE)
+        return -ENOSYS;
+    ret = nbg_normalize_remote_range(remote_addr, size, &start);
     if (ret)
         return ret;
-
-    ret = nbg_read_ctx_read(&ctx, addr, buf, size);
-    nbg_read_ctx_release(&ctx);
-    return ret;
+    end = start + size;
+    if (end < start)
+        return -EINVAL;
+    return nbg_call_flush_icache_range(start, end) ? 0 : -ENOSYS;
 }
 
-/* 批量离散读取：一次取 mm，逐个 iov 走 NC 直读，逐个回写 status。
- * 与单次读取同语义，只是省掉重复的 find_vpid / get_task_mm。 */
-static int nbg_readv_mode(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
+static int nbg_readv_memory_mode(pid_t pid, READV_ENTRY __user *iov,
+                                 uint32_t count, bool fault_in)
 {
-    struct nbg_read_ctx ctx;
     READV_ENTRY *entries;
+    struct mm_struct *mm;
     uint32_t i;
-    bool need_mm = false;
+    bool need_mm;
+    bool same_mm;
+    bool interrupted;
     int ret;
 
     if (!iov || !count || count > NBG_IOV_MAX)
         return -EINVAL;
+    if (in_atomic() || irqs_disabled())
+        return -EBUSY;
 
-    entries = nbg_kvmalloc_array(count, sizeof(*entries), GFP_KERNEL);
+    entries = kvmalloc(count * sizeof(*entries), GFP_KERNEL);
     if (!entries)
         return -ENOMEM;
 
@@ -1069,23 +1017,31 @@ static int nbg_readv_mode(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
         return -EFAULT;
     }
 
+    need_mm = false;
     for (i = 0; i < count; i++) {
         entries[i].status = 0;
-        if (!entries[i].size)
+        if (!entries[i].size) {
             continue;
-        if (!entries[i].addr || !entries[i].buffer)
+        } else if (!entries[i].addr || !entries[i].buffer) {
             entries[i].status = -EINVAL;
-        else if (entries[i].size > NBG_READ_MAX)
+        } else if (entries[i].size > NBG_MAX_RW_SIZE) {
             entries[i].status = -EMSGSIZE;
-        else if (!access_ok((void __user *)entries[i].buffer,
-                            entries[i].size))
+        } else if (nbg_normalize_remote_range(entries[i].addr,
+                                              entries[i].size, NULL)) {
+            entries[i].status = -EINVAL;
+        } else if (nbg_validate_user_range((uintptr_t)entries[i].buffer,
+                                           entries[i].size)) {
             entries[i].status = -EFAULT;
-        else
+        } else {
             need_mm = true;
+        }
     }
 
+    mm = NULL;
+    same_mm = false;
+    interrupted = false;
     if (need_mm) {
-        ret = nbg_read_ctx_init_pid(&ctx, pid);
+        ret = get_target_mm_cached(pid, &mm);
         if (ret) {
             for (i = 0; i < count; i++) {
                 if (entries[i].size && entries[i].status == 0)
@@ -1093,43 +1049,86 @@ static int nbg_readv_mode(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
             }
             goto copy_back;
         }
+        same_mm = (mm == current->mm);
 
         for (i = 0; i < count; i++) {
-            ssize_t got;
+            unsigned long remote_start;
+            size_t done;
 
             if (!entries[i].size || entries[i].status)
                 continue;
 
-            got = nbg_nc_memrw(ctx.mm, (unsigned long)entries[i].addr,
-                               (char __user *)entries[i].buffer,
-                               entries[i].size, false);
-            if (got < 0)
-                entries[i].status = (int)got;
-            else if ((uint32_t)got != entries[i].size)
-                entries[i].status = -EFAULT;
+            ret = nbg_normalize_remote_range(entries[i].addr,
+                                             entries[i].size, &remote_start);
+            if (ret) {
+                entries[i].status = ret;
+                continue;
+            }
+
+            if (same_mm) {
+                void *bounce;
+
+                bounce = kvmalloc(entries[i].size, GFP_KERNEL);
+                if (!bounce) {
+                    entries[i].status = -ENOMEM;
+                    continue;
+                }
+                done = 0;
+                entries[i].status = fault_in
+                    ? nbg_remote_read_kernel_fault_mm(mm, remote_start, bounce,
+                                                      entries[i].size, &done)
+                    : nbg_remote_read_kernel_pte_mm(mm, remote_start, bounce,
+                                                    entries[i].size, &done);
+                if (entries[i].status == 0 &&
+                    copy_to_user(entries[i].buffer, bounce, entries[i].size))
+                    entries[i].status = -EFAULT;
+                kvfree(bounce);
+            } else {
+                done = 0;
+                entries[i].status = fault_in
+                    ? nbg_remote_read_user_fault_mm(mm, remote_start,
+                                                    (uintptr_t)entries[i].buffer,
+                                                    entries[i].size, &done)
+                    : nbg_remote_read_user_pte_mm(mm, remote_start,
+                                                  (uintptr_t)entries[i].buffer,
+                                                  entries[i].size, &done);
+            }
 
             cond_resched();
             if (fatal_signal_pending(current)) {
-                for (i++; i < count; i++) {
-                    if (entries[i].size && entries[i].status == 0)
-                        entries[i].status = -EINTR;
-                }
+                interrupted = true;
                 break;
             }
         }
-        nbg_read_ctx_release(&ctx);
+
+        if (interrupted) {
+            for (i++; i < count; i++) {
+                if (entries[i].size && entries[i].status == 0)
+                    entries[i].status = -EINTR;
+            }
+        }
     }
 
 copy_back:
     if (copy_to_user(iov, entries, count * sizeof(*entries))) {
+        if (mm)
+            mmput(mm);
         kvfree(entries);
         return -EFAULT;
     }
+
+    if (mm)
+        mmput(mm);
     kvfree(entries);
     return 0;
 }
 
 int nbg_readv_memory(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
 {
-    return nbg_readv_mode(pid, iov, count);
+    return nbg_readv_memory_mode(pid, iov, count, false);
+}
+
+int nbg_readv_memory_fault(pid_t pid, READV_ENTRY __user *iov, uint32_t count)
+{
+    return nbg_readv_memory_mode(pid, iov, count, true);
 }

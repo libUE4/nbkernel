@@ -11,7 +11,6 @@
 #define NBG_RO_INPUT_LIST 0x942U
 #define NBG_RO_INPUT_READ 0x943U
 #define NBG_RO_THREAD_FPSTATE 0x944U
-#define NBG_RO_RANDOM 0x946U
 #define NBG_RO_GPU_INFO 0x93BU
 #define NBG_RO_FEATURE_MAPS (1ULL << 0)
 #define NBG_RO_FEATURE_THREAD (1ULL << 1)
@@ -71,13 +70,6 @@ struct NbgRoGpuObject {
 struct NbgRoGpuRequest {
     __u32 abi; __s32 pid, target_fd; __u32 object_id;
     __s64 result; __u64 sample_ns; struct NbgRoGpuObject info;
-};
-/* Fill a bounded userspace buffer with kernel-provided random bytes. */
-struct NbgRoRandom {
-    __u32 abi;
-    __u32 size;
-    __u64 buffer;
-    __s64 result;
 };
 struct NbgRoInputSubscription { __u32 abi, enabled; };
 struct NbgRoInputDevice {

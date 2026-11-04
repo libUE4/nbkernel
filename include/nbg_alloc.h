@@ -8,12 +8,12 @@
 #ifndef _NBG_ALLOC_H_
 #define _NBG_ALLOC_H_
 
-#include <linux/mm.h>
+#include <linux/gfp.h>
+#include <linux/limits.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/version.h>
-#include <linux/vmalloc.h>
 
 static __always_inline void *nbg_kmalloc(size_t size, gfp_t flags)
 {
@@ -97,35 +97,6 @@ static __always_inline char *nbg_kstrdup(const char *src, gfp_t flags)
     if (p)
         memcpy(p, src, len);
     return p;
-}
-
-/* kvmalloc / kvmalloc_array 在 6.10+ 会展开成 *_noprof 符号，而设备内核
- * 往往只导出旧名字，直接引用会让模块加载时报 Unknown symbol。
- * 这里用 kmalloc 优先、vmalloc 兜底自己选路；两者各版本都稳定导出，
- * 释放时 kvfree 能同时处理两种指针。 */
-static __always_inline void *nbg_kvmalloc(size_t size, gfp_t flags)
-{
-    void *p;
-
-    if (!size)
-        return NULL;
-
-    if (size <= (size_t)(2 * PAGE_SIZE)) {
-        p = nbg_kmalloc(size, flags);
-        if (p)
-            return p;
-    }
-
-    return vmalloc(size);
-}
-
-static __always_inline void *nbg_kvmalloc_array(size_t n, size_t size,
-                                               gfp_t flags)
-{
-    if (size && n > SIZE_MAX / size)
-        return NULL;
-
-    return nbg_kvmalloc(n * size, flags);
 }
 
 #endif /* _NBG_ALLOC_H_ */

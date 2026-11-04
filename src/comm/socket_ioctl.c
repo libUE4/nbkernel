@@ -32,11 +32,6 @@
 #include "nbg_readonly.h"
 #include "memory.h"
 #include "process.h"
-#include "query.h"
-#include "sensor_mem.h"
-#include "udp_capture.h"
-#include "sf_groups.h"
-#include "file_io.h"
 #include "touch.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
@@ -1185,18 +1180,7 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
 
         if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
             return -EFAULT;
-        ret = nbg_read_memory_fault(req.pid, req.addr,
-                                    (uintptr_t)req.buffer, req.size,
-                                    &nbytes);
-        return ret;
-    }
-    case OP_READ_MEM_CACHE: {
-        COPY_MEMORY req;
-        size_t nbytes = 0;
-
-        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-            return -EFAULT;
-        ret = nbg_read_memory_cache(req.pid, req.addr, (uintptr_t)req.buffer,
+        ret = nbg_read_memory_fault(req.pid, req.addr, (uintptr_t)req.buffer,
                                     req.size, &nbytes);
         return ret;
     }
@@ -1210,111 +1194,64 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
                                req.size, &nbytes);
         return ret;
     }
-    case OP_FLUSH_ICACHE:
-        return -ENOTTY;
+    case OP_FLUSH_ICACHE: {
+        FLUSH_ICACHE_REQ req;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        return nbg_flush_icache(req.pid, req.addr, req.size);
+    }
     case OP_READV_MEM: {
         READV_MEMORY req;
 
         if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
             return -EFAULT;
-        return nbg_readv_memory(req.pid, (READV_ENTRY __user *)req.iovs,
-                                req.count);
+        return nbg_readv_memory(req.pid, (READV_ENTRY __user *)req.iovs, req.count);
     }
+    case OP_READV_MEM_FAULT: {
+        READV_MEMORY req;
 
-    /* 进程 / 线程 / 地址查询 */
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        return nbg_readv_memory_fault(req.pid, (READV_ENTRY __user *)req.iovs,
+                                      req.count);
+    }
     case OP_MODULE_BASE: {
-        /* 旧命令名转新实现，直接走内核侧扫描，不经用户指针。 */
         MODULE_BASE req;
-        char name[256];
-        uint64_t base = 0;
-        uint64_t size = 0;
+        char name[NBG_NAME_LEN];
         long copied;
 
         if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
             return -EFAULT;
         if (!req.name)
             return -EINVAL;
-        copied = strncpy_from_user(name, (char __user *)req.name,
-                                   sizeof(name) - 1);
+        copied = strncpy_from_user(name, (char __user *)req.name, sizeof(name));
         if (copied < 0)
             return -EFAULT;
-        name[copied] = '\0';
-        if (name[0] == '\0')
-            return -EINVAL;
-
-        if (nbg_scan_module_kernel(&base, &size, req.pid, name, 0, NULL, 0))
-            return -ENOENT;
-
-        req.base = (uintptr_t)base;
+        name[NBG_NAME_LEN - 1] = '\0';
+        req.base = get_module_base(req.pid, name);
         if (copy_to_user((void __user *)arg, &req, sizeof(req)))
             return -EFAULT;
-        return base ? 0 : -ENOENT;
+        return req.base ? 0 : -ENOENT;
     }
     case OP_FIND_PID: {
-        /* 旧命令名转新实现，直接走内核侧查找，不经用户指针。 */
         FIND_PID_REQ req;
-        char name[256];
+        char name[NBG_NAME_LEN];
         long copied;
 
         if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
             return -EFAULT;
         if (!req.name)
             return -EINVAL;
-        copied = strncpy_from_user(name, (char __user *)req.name,
-                                   sizeof(name) - 1);
+        copied = strncpy_from_user(name, (char __user *)req.name, sizeof(name));
         if (copied < 0)
             return -EFAULT;
-        name[copied] = '\0';
-
-        /* Keep package-name matching in kernel space.  Android package names
-         * are commonly longer than TASK_COMM_LEN, so the ranked argv[0]
-         * matcher is required instead of the truncated comm-only lookup. */
+        name[NBG_NAME_LEN - 1] = '\0';
         req.pid = find_pid_by_cmdline_ranked(name);
         if (copy_to_user((void __user *)arg, &req, sizeof(req)))
             return -EFAULT;
         return req.pid > 0 ? 0 : -ESRCH;
     }
-    case OP_GET_PID:
-        return nbg_query_pid((void __user *)arg);
-    case OP_GET_PIDS:
-        return nbg_query_pids((void __user *)arg);
-    case OP_MODULE_BASE_EX:
-        return nbg_query_module_base((void __user *)arg);
-    case OP_MODULE_BASE2_EX:
-        return nbg_query_module_base2((void __user *)arg);
-    case OP_MODULE_PATH_EX:
-        return nbg_query_module_path((void __user *)arg);
-    case OP_GET_TLS:
-        return nbg_query_tls((void __user *)arg);
-    case OP_GET_THREAD_TID:
-        return nbg_query_thread_tid((void __user *)arg);
-    case OP_GET_THREAD_TIDS:
-        return nbg_query_thread_tids((void __user *)arg);
-    case OP_GET_THREAD_STACK:
-        return nbg_query_thread_stack((void __user *)arg);
-    case OP_QUERY_MAPPING:
-        return nbg_query_mapping((void __user *)arg);
-    case OP_QUERY_ACCESS:
-        return nbg_query_access((void __user *)arg);
-    case OP_QUERY_SIGNAL:
-        return nbg_query_signal((void __user *)arg);
-    case OP_EXECUTE_PACGA:
-        return nbg_query_pacga((void __user *)arg);
-    case OP_SENSOR_OPEN:
-        return nbg_sensor_open((void __user *)arg);
-    case OP_UDP_CAP_INIT:
-        return nbg_udp_capture_init((void __user *)arg);
-    case OP_UDP_CAP_READ:
-        return nbg_udp_capture_read((void __user *)arg);
-    case OP_UDP_CAP_STOP:
-        return nbg_udp_capture_stop();
-    case OP_SF_GROUPS_ACQUIRE:
-        return nbg_sf_groups_acquire((void __user *)arg);
-    case OP_FILE_READ:
-        return nbg_file_read((void __user *)arg);
-    case OP_FILE_WRITE:
-        return nbg_file_write((void __user *)arg);
-
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;
 
@@ -1499,7 +1436,6 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
     case NBG_RO_THREAD:
     case NBG_RO_THREAD_FPSTATE:
     case NBG_RO_FD:
-    case NBG_RO_RANDOM:
     case NBG_RO_FILE:
         return nbg_readonly_ioctl(cmd, arg);
     case NBG_RO_INPUT_SUBSCRIBE:
@@ -1628,7 +1564,7 @@ static void nbg_last_client_cleanup_now(void)
     touch_up_all();
     watch_clear_all();
     shadow_del_hook(&all);      /* target_vaddr=0 => 清全部执行断点/影子 hook */
-    /* linearmap 是模块级资源，客户端断开不释放。 */
+    nbg_memory_cache_cleanup(); /* 释放旧目标进程 mm cache 引用 */
     hide_cleanup_runtime_state();
 }
 

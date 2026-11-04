@@ -12,7 +12,6 @@
 #include <linux/mm_inline.h>
 #include <linux/pid.h>
 #include <linux/ptrace.h>
-#include <linux/random.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
@@ -25,7 +24,6 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include "nbg_alloc.h"
-#include "memory.h"
 #include "nbg_compat.h"
 #include "export_fun.h"
 #include "nbg_readonly.h"
@@ -72,26 +70,6 @@ static int ro_symbols(void)
     result = ro_access && ro_syscall && ro_fget ? 0 : -EOPNOTSUPP;
     mutex_unlock(&ro_symbols_lock);
     return result;
-}
-
-static long ro_random_ioctl(unsigned long argument)
-{
-    struct NbgRoRandom req;
-    u8 bytes[64];
-
-    if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
-        return -EFAULT;
-    if (req.abi != NBG_RO_ABI || req.size == 0 || req.size > sizeof(bytes) ||
-        req.buffer == 0)
-        return -EINVAL;
-
-    get_random_bytes(bytes, req.size);
-    if (copy_to_user((void __user *)(unsigned long)req.buffer, bytes, req.size))
-        return -EFAULT;
-    req.result = req.size;
-    if (copy_to_user((void __user *)argument, &req, sizeof(req)))
-        return -EFAULT;
-    return 0;
 }
 
 /* Hold exec_update_lock through each query, including the access check.
@@ -215,9 +193,8 @@ static const char *ro_anon_name(struct vm_area_struct *vma, char *scratch)
         size_t offset = offset_in_page(address);
         size_t available = min_t(size_t, NAME_MAX - used, PAGE_SIZE - offset);
         size_t length;
-        long pinned = nbg_get_user_page_remote(vma->vm_mm,
-                                                   address & PAGE_MASK, 0,
-                                                   &page);
+        long pinned = get_user_pages_remote(vma->vm_mm, address & PAGE_MASK,
+                                           1, 0, &page, NULL, NULL);
 
         if (pinned != 1) return ERR_PTR(pinned < 0 ? pinned : -EFAULT);
         mapped = compat_kmap_page(page);
@@ -227,7 +204,7 @@ static const char *ro_anon_name(struct vm_area_struct *vma, char *scratch)
         /* Release the ordinary GUP reference through a kernel entry point.
          * Inlining put_page here imports optional PAGE_PINNER internals from
          * the build headers, absent on several older device kernels. */
-        nbg_release_user_page(page);
+        release_pages(&page, 1);
         used += length;
         if (length < available) break;
         address += available;
@@ -287,7 +264,7 @@ static long ro_maps_ioctl(unsigned long argument)
     task = ro_task(req.pid, req.pid); if (IS_ERR(task)) return PTR_ERR(task);
     req.process_start_ns = READ_ONCE(task->start_boottime); req.length = 0;
     mm = get_task_mm(task); if (!mm) { result = -ESRCH; goto put_task; }
-    out.bytes = nbg_kvmalloc(req.capacity, GFP_KERNEL); out.capacity = req.capacity;
+    out.bytes = kvmalloc(req.capacity, GFP_KERNEL); out.capacity = req.capacity;
     out.path = nbg_kmalloc(PATH_MAX, GFP_KERNEL);
     out.line = nbg_kmalloc(PATH_MAX + 256, GFP_KERNEL);
     if (!out.bytes || !out.path || !out.line) { result = -ENOMEM; goto free_output; }
@@ -468,7 +445,6 @@ long nbg_readonly_ioctl(unsigned int command, unsigned long argument)
     case NBG_RO_THREAD: return ro_thread_ioctl(argument);
     case NBG_RO_THREAD_FPSTATE: return ro_thread_fpstate_ioctl(argument);
     case NBG_RO_FD: return ro_fd_ioctl(argument);
-    case NBG_RO_RANDOM: return ro_random_ioctl(argument);
     case NBG_RO_FILE: return ro_file_ioctl(argument);
     default: return -ENOTTY;
     }
