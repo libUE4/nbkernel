@@ -195,23 +195,23 @@ static DEFINE_MUTEX(rot_hook_mutex);
 #define DFM_SCALAR_HOOK_EVENT          0xD5A5U
 #define DFM_SCALAR_HOOK_FPSTATE_FLAG   0x80000000U
 #define DFM_OUTLINE_MATERIAL_LOAD_INSN   0xF9439288U /* LDR X8,[X20,#0x720] */
-#define DFM_OUTLINE_MATERIAL_LOAD_RVA    0x10812CD8ULL
+#define DFM_OUTLINE_MATERIAL_LOAD_RVA    0x1080A9F8ULL
 /* 同一段渲染快照代码里紧随材质之后的标志字节读取：
- *   0x10812CE8  LDRB W8,[X20,#0x728]  → AND #0xFF  → bDrawEffectPass
- *   0x10812D00  LDRB W8,[X20,#0x728]  → UBFX #2,#1 → bEffectPassNeedDepth
+ *   0x1080AA00  LDRB W8,[X20,#0x728]  → 第一处（命中即抬高 bit0）
+ *   0x1080AA0C  LDRB W8,[X20,#0x728]  → 第二处
  * 断点命中时只改 X8，不写目标内存。 */
 #define DFM_OUTLINE_FLAGS_LOAD_INSN       0x395CA288U /* LDRB W8,[X20,#0x728] */
-#define DFM_OUTLINE_FLAGS_DRAW_RVA        0x10812CE0ULL
-#define DFM_OUTLINE_FLAGS_DEPTH_RVA      (DFM_OUTLINE_MATERIAL_LOAD_RVA + 0x28ULL)
+#define DFM_OUTLINE_FLAGS_DRAW_RVA        0x1080AA00ULL
+#define DFM_OUTLINE_FLAGS_DEPTH_RVA      0x1080AA18ULL /* 第三处 LDRB W8,[X20,#0x728]，实测；当前未使用 */
 #define DFM_EFFECT_PASS_DRAW_BIT         0x01U
 #define DFM_EFFECT_PASS_DEPTH_BIT        0x04U
 #define DFM_COMPONENT_OWNER_OFFSET       0x0E8ULL
 #define DFM_CHARACTER_NET_UPDATE_OFFSET  0x150ULL
 #define DFM_CHARACTER_MAIN_MESH_OFFSET   0x3D0ULL
-#define DFM_CHARACTER_BOT_FLAG_OFFSET    0x11F8ULL
-#define DFM_CHARACTER_TEAM_COMP_OFFSET   0x10C0ULL
-/* ADFMCharacter::DFMOutLineEffectComponent（旧赛季在 Character 上为 0x2448） */
-#define DFM_CHARACTER_OUTLINE_OFFSET     0x2508ULL
+#define DFM_CHARACTER_BOT_FLAG_OFFSET    0x1228ULL
+#define DFM_CHARACTER_TEAM_COMP_OFFSET   0x10F0ULL
+/* ADFMCharacter::DFMOutLineEffectComponent（新赛季 Character 类尾增长，自 0x2508 移至 0x25C8） */
+#define DFM_CHARACTER_OUTLINE_OFFSET     0x25C8ULL
 #define DFM_WEAPON_CHARACTER_OWNER       0xA60ULL
 #define DFM_TEAM_ID_OFFSET               0x108ULL
 #define DFM_OUTLINE_RED_OFFSET           0x110ULL
@@ -2218,9 +2218,9 @@ static void rot_hook_callback(struct pt_regs *regs, void *priv)
     }
     case NBG_SHADOW_DFM_OUTLINE_FLAGS_TYPE: {
         /* 同一个字节 0x728 的三个位被分三次读：
-         *   bit0 bDrawEffectPass        （0x10812CE8）
+         *   bit0 bDrawEffectPass        （略载后第一处）
          *   bit1 bReverseDrawEffectPassCulling
-         *   bit2 bEffectPassNeedDepth   （0x10812D00）
+         *   bit2 bEffectPassNeedDepth   （后续处）
          * 这里只抬高 bit0，让引擎走 EffectPass 通道；
          * 不写目标内存，只改本次 LDRB 的目标寄存器。 */
         if (!ctx->insn_decoded || ctx->dec_is_fp || !ctx->dec_is_load ||
