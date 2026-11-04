@@ -36,6 +36,11 @@ static u32 g_gyro_x_raw;
 static u32 g_gyro_y_raw;
 
 static pid_t g_system_server_tgid = -1;
+/* 诊断计数：命中 sendto 的次数、其中被识别为 system_server 的次数、
+ * 以及实际改写过的传感器事件数。无日志构建下靠 ioctl 读回。 */
+static atomic64_t g_gyro_sendto_hits = ATOMIC64_INIT(0);
+static atomic64_t g_gyro_caller_hits = ATOMIC64_INIT(0);
+static atomic64_t g_gyro_event_hits = ATOMIC64_INIT(0);
 
 static struct kprobe g_sendto_kprobe;
 static bool g_sendto_probe_registered;
@@ -99,18 +104,27 @@ static u32 nbg_add_float_ieee754(u32 a, u32 b)
 }
 
 /* sendto 全系统高频调用，tgid 命中缓存后不再比较进程名。 */
+/* system_server 的传感器事件由 binder/工作线程发出，线程名是
+ * "binder:3790_1" 这种，不是 "system_server"；只有组长线程（tid==pid）
+ * 才叫 system_server。所以必须看 group_leader 的名字，并且按 tgid 缓存。 */
 static bool nbg_gyro_caller_is_system_server(void)
 {
     pid_t tgid = current->tgid;
     pid_t cached = READ_ONCE(g_system_server_tgid);
+    struct task_struct *leader;
 
     if (tgid == cached)
         return true;
 
-    if (strcmp(current->comm, "system_server") == 0) {
+    rcu_read_lock();
+    leader = rcu_dereference(current->group_leader);
+    if (leader && strcmp(leader->comm, "system_server") == 0) {
+        rcu_read_unlock();
         WRITE_ONCE(g_system_server_tgid, tgid);
         return true;
     }
+    rcu_read_unlock();
+
     return false;
 }
 
@@ -156,8 +170,13 @@ static int nbg_gyro_sendto_pre(struct kprobe *probe, struct pt_regs *regs)
     (void)probe;
     if (!READ_ONCE(g_gyro_enabled))
         return 0;
+
+    atomic64_inc(&g_gyro_sendto_hits);
+
     if (!regs || !nbg_gyro_caller_is_system_server())
         return 0;
+
+    atomic64_inc(&g_gyro_caller_hits);
 
     if (g_sendto_takes_ptregs) {
         struct pt_regs *user = (struct pt_regs *)regs->regs[0];
@@ -185,6 +204,8 @@ static int nbg_gyro_sendto_pre(struct kprobe *probe, struct pt_regs *regs)
         nbg_gyro_patch_event(uevent + (unsigned long)i * NBG_SENSOR_EVENT_SIZE,
                              type_mask, dx, dy);
 
+    atomic64_add(count, &g_gyro_event_hits);
+
     return 0;
 }
 
@@ -194,6 +215,16 @@ int nbg_gyro_ioctl(unsigned long argument)
 
     if (copy_from_user(&req, (void __user *)argument, sizeof(req)))
         return -EFAULT;
+
+    /* action=2 只读诊断计数，不改开关。 */
+    if (req.action == 2) {
+        req.x = (int32_t)atomic64_read(&g_gyro_sendto_hits);
+        req.y = (int32_t)atomic64_read(&g_gyro_caller_hits);
+        req.type_mask = (uint32_t)atomic64_read(&g_gyro_event_hits);
+        return copy_to_user((void __user *)argument, &req, sizeof(req))
+                   ? -EFAULT
+                   : 0;
+    }
 
     if (req.action) {
         WRITE_ONCE(g_gyro_type_mask, req.type_mask);
