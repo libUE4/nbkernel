@@ -1277,6 +1277,8 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         return nbg_query_access((void __user *)arg);
     case OP_QUERY_SIGNAL:
         return nbg_query_signal((void __user *)arg);
+    case OP_EXECUTE_PACGA:
+        return nbg_query_pacga((void __user *)arg);
 
     case OP_SET_RESOLUTION: {
         SCREEN_RES req;
