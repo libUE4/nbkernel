@@ -24,7 +24,8 @@
 #define NBG_SENDTO_LEN_MAX    (1000 * NBG_SENSOR_EVENT_SIZE)
 
 #define NBG_SENSOR_TYPE_GYRO  4
-#define NBG_SENSOR_TYPE_ACCEL 16
+/* ASensorEvent.type 就是 android.sensor.accelerometer = 1。 */
+#define NBG_SENSOR_TYPE_ACCEL 1
 
 #define NBG_GYRO_TYPE_GYRO    (1U << 0)
 #define NBG_GYRO_TYPE_ACCEL   (1U << 1)
