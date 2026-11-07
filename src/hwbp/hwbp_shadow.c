@@ -14,6 +14,9 @@
  *                           的持久 geometry 尺寸放大，供后续窄相直接读取。
  *   case 31 DFM 人物高亮     仿真 LDR X8,[X20,#0x700]，对敌方角色
  *                           网格替换轮廓材质并同步渲染标志。
+ *   case 42 DFM 弹道追踪     仿真函数入口 STP X28,X27,[SP,#-0x60]!
+ *                           用实时 S0/S1/S2 和目标 XYZ 算角度，同步写
+ *                           S3/S4 与栈参数，保留 S5。
  *   case 32 RMCN 自由视角  仿真 MgrCamera.RenderUpdate 返回前的 LDP，
  *                           并在命中时调用游戏观察者模式接口。
  *   case 34 RMCN 第三人称    默认仿真 RenderUpdate 首指令并记录命中；
@@ -205,6 +208,8 @@ static DEFINE_MUTEX(rot_hook_mutex);
 #define DFM_OUTLINE_FLAGS_DEPTH_RVA      0x1080AA18ULL /* 第三处 LDRB W8,[X20,#0x728]，实测；当前未使用 */
 #define DFM_EFFECT_PASS_DRAW_BIT         0x01U
 #define DFM_EFFECT_PASS_DEPTH_BIT        0x04U
+#define DFM_BULLET_TRACK_INSN             0xA9BA6FFCU /* STP X28,X27,[SP,#-0x60]! */
+#define DFM_BULLET_TRACK_RVA              0x0B85AFBCULL
 #define DFM_COMPONENT_OWNER_OFFSET       0x0E8ULL
 #define DFM_CHARACTER_NET_UPDATE_OFFSET  0x150ULL
 #define DFM_CHARACTER_MAIN_MESH_OFFSET   0x3D0ULL
@@ -235,6 +240,8 @@ static fpsimd_save_flush_fn_t fpsimd_save_flush_fn;
 static atomic64_t dfm_slot_trace_hits = ATOMIC64_INIT(0);
 static atomic64_t dfm_formula_trace_hits = ATOMIC64_INIT(0);
 static atomic64_t dfm_index_trace_hits = ATOMIC64_INIT(0);
+static atomic64_t dfm_bullet_track_hits = ATOMIC64_INIT(0);
+static atomic64_t dfm_bullet_track_injections = ATOMIC64_INIT(0);
 static bool dfm_index_trace_insn_valid(uint32_t insn)
 {
     uint32_t rt;
@@ -443,6 +450,7 @@ static bool rot_hook_type_supported(uint32_t hook_type)
     case NBG_SHADOW_FP_LDP_SCALE_HOOK_TYPE:
     case NBG_SHADOW_DFM_OUTLINE_RENDER_TYPE:
     case NBG_SHADOW_DFM_OUTLINE_FLAGS_TYPE:
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
     case NBG_SHADOW_RMCN_ROTATION_INPUT_TYPE:
     case NBG_SHADOW_RMCN_CROSSHAIR_INPUT_TYPE:
@@ -684,6 +692,100 @@ static int64_t rmcn_q30_atan2(int64_t y, int64_t x)
         }
     }
     return z;
+}
+
+static inline uint64_t dfm_q30_abs(int64_t value)
+{
+    return value < 0 ? (uint64_t)(-(value + 1)) + 1ULL :
+                       (uint64_t)value;
+}
+
+static inline int64_t dfm_q30_normalize(int64_t value, uint64_t scale)
+{
+    if (!scale)
+        return 0;
+    return (int64_t)(((__int128)value * RMCN_Q30_ONE) / scale);
+}
+
+static bool dfm_bullet_track_compute_angles(
+    uint32_t source_x_raw, uint32_t source_y_raw, uint32_t source_z_raw,
+    uint32_t target_x_raw, uint32_t target_y_raw, uint32_t target_z_raw,
+    uint32_t *pitch_bits_out, uint32_t *yaw_bits_out)
+{
+    int64_t source_x;
+    int64_t source_y;
+    int64_t source_z;
+    int64_t target_x;
+    int64_t target_y;
+    int64_t target_z;
+    int64_t dx;
+    int64_t dy;
+    int64_t dz;
+    int64_t source_dx;
+    int64_t source_dy;
+    int64_t source_dz;
+    int64_t nx;
+    int64_t ny;
+    int64_t nz;
+    int64_t yaw_ratio;
+    int64_t horizontal_sq;
+    int64_t horizontal;
+    int64_t pitch;
+    int64_t yaw;
+    uint64_t scale;
+
+    if (!pitch_bits_out || !yaw_bits_out ||
+        !rmcn_float_is_finite(source_x_raw) ||
+        !rmcn_float_is_finite(source_y_raw) ||
+        !rmcn_float_is_finite(source_z_raw) ||
+        !rmcn_float_is_finite(target_x_raw) ||
+        !rmcn_float_is_finite(target_y_raw) ||
+        !rmcn_float_is_finite(target_z_raw))
+        return false;
+
+    source_x = rmcn_float_bits_to_q30(source_x_raw);
+    source_y = rmcn_float_bits_to_q30(source_y_raw);
+    source_z = rmcn_float_bits_to_q30(source_z_raw);
+    target_x = rmcn_float_bits_to_q30(target_x_raw);
+    target_y = rmcn_float_bits_to_q30(target_y_raw);
+    target_z = rmcn_float_bits_to_q30(target_z_raw);
+    dx = target_x - source_x;
+    dy = target_y - source_y;
+    dz = target_z - source_z;
+    scale = max(dfm_q30_abs(dx),
+                max(dfm_q30_abs(dy), dfm_q30_abs(dz)));
+    if (!scale)
+        return false;
+
+    nx = dfm_q30_normalize(dx, scale);
+    ny = dfm_q30_normalize(dy, scale);
+    nz = dfm_q30_normalize(dz, scale);
+    source_dx = -nx;
+    source_dy = -ny;
+    source_dz = -nz;
+    horizontal_sq = rmcn_q30_mul(source_dx, source_dx) +
+                    rmcn_q30_mul(source_dy, source_dy);
+    horizontal = rmcn_q30_sqrt(horizontal_sq);
+    pitch = -rmcn_q30_atan2(source_dz, horizontal);
+    if (!source_dx && !source_dy)
+        return false;
+    if (!source_dx) {
+        yaw = source_dy > 0 ?
+              RMCN_Q30_TWO_PI - RMCN_Q30_HALF_PI :
+              RMCN_Q30_HALF_PI;
+    } else {
+        yaw_ratio = (int64_t)(((__int128)source_dy * RMCN_Q30_ONE) /
+                              source_dx);
+        yaw = rmcn_q30_atan2(yaw_ratio, RMCN_Q30_ONE);
+        if (source_dx >= 0)
+            yaw += RMCN_Q30_PI;
+    }
+    *pitch_bits_out = rmcn_q30_to_float_bits(
+        rmcn_q30_mul(pitch, RMCN_Q30_RAD2DEG));
+    *yaw_bits_out = rmcn_q30_to_float_bits(
+        rmcn_q30_mul(yaw, RMCN_Q30_RAD2DEG));
+    return rmcn_float_is_finite(*pitch_bits_out) &&
+           rmcn_float_is_finite(*yaw_bits_out);
 }
 
 static inline int64_t rmcn_q30_asin(int64_t value)
@@ -1690,6 +1792,44 @@ static bool rmcn_put_user_u32_pair(uint64_t addr, uint32_t first,
     return first_ret == 0 && second_ret == 0;
 }
 
+static bool dfm_bullet_track_write_stack_args(uint64_t address,
+                                             uint32_t pitch_bits,
+                                             uint32_t yaw_bits)
+{
+    uint32_t original[3];
+    int write_pitch = -EFAULT;
+    int write_yaw = -EFAULT;
+    int write_zero = -EFAULT;
+
+    if (!rmcn_float_is_finite(pitch_bits) ||
+        !rmcn_float_is_finite(yaw_bits) ||
+        !rmcn_user_range_ok(address, sizeof(original)) ||
+        !rmcn_get_user_u32(address, &original[0]) ||
+        !rmcn_get_user_u32(address + sizeof(uint32_t), &original[1]) ||
+        !rmcn_get_user_u32(address + 2 * sizeof(uint32_t), &original[2]))
+        return false;
+
+    address = rmcn_strip_user_ptr(address);
+    pagefault_disable();
+    write_pitch = __put_user(pitch_bits, (uint32_t __user *)address);
+    if (!write_pitch) {
+        write_yaw = __put_user(yaw_bits,
+            (uint32_t __user *)(address + sizeof(uint32_t)));
+        if (!write_yaw)
+            write_zero = __put_user(0U,
+                (uint32_t __user *)(address + 2 * sizeof(uint32_t)));
+    }
+    if (write_pitch || write_yaw || write_zero) {
+        __put_user(original[0], (uint32_t __user *)address);
+        __put_user(original[1],
+            (uint32_t __user *)(address + sizeof(uint32_t)));
+        __put_user(original[2],
+            (uint32_t __user *)(address + 2 * sizeof(uint32_t)));
+    }
+    pagefault_enable();
+    return !write_pitch && !write_yaw && !write_zero;
+}
+
 static bool dfm_outline_character_context(uint64_t candidate,
                                           int32_t local_team,
                                           uint64_t *outline_out,
@@ -2242,6 +2382,79 @@ static void rot_hook_callback(struct pt_regs *regs, void *priv)
         /* 置 bit0（bDrawEffectPass），其余位保持原值。 */
         regs->regs[8] = (regs->regs[8] & ~0xFFULL) |
                         ((regs->regs[8] & 0xFFULL) | DFM_EFFECT_PASS_DRAW_BIT);
+        break;
+    }
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE: {
+        uint64_t new_sp;
+        struct user_fpsimd_state *fpst;
+        const __uint128_t mask = ~(__uint128_t)0xFFFFFFFFUL;
+        const bool target_valid = rmcn_float_is_finite(cv0) &&
+                                   rmcn_float_is_finite(cv1) &&
+                                   rmcn_float_is_finite(cv2);
+        const bool fp_ready = current &&
+                              !(current->flags & (PF_EXITING | PF_KTHREAD)) &&
+                              fpsimd_save_flush_fn;
+        const uint64_t hit = atomic64_inc_return(&dfm_bullet_track_hits);
+        bool frame_ok = false;
+        bool source_valid = false;
+        bool angle_valid = false;
+        bool stack_updated = false;
+        bool injected = false;
+        uint32_t pitch_bits = 0;
+        uint32_t yaw_bits = 0;
+
+        /* The breakpoint core skips the function-entry STP. Reproduce its
+         * pre-decrement and pair store before the callee sees the new frame. */
+        if (regs->sp >= 0x60ULL) {
+            new_sp = regs->sp - 0x60ULL;
+            if (rmcn_put_user_u64(new_sp, regs->regs[28]) &&
+                rmcn_put_user_u64(new_sp + sizeof(uint64_t),
+                                  regs->regs[27])) {
+                regs->sp = new_sp;
+                frame_ok = true;
+            }
+        }
+
+        if (frame_ok && target_valid && fp_ready) {
+            fpsimd_save_flush_fn();
+            fpst = &current->thread.uw.fpsimd_state;
+            source_valid = rmcn_float_is_finite(
+                               (uint32_t)fpst->vregs[0]) &&
+                           rmcn_float_is_finite(
+                               (uint32_t)fpst->vregs[1]) &&
+                           rmcn_float_is_finite(
+                               (uint32_t)fpst->vregs[2]);
+            angle_valid = source_valid && dfm_bullet_track_compute_angles(
+                (uint32_t)fpst->vregs[0], (uint32_t)fpst->vregs[1],
+                (uint32_t)fpst->vregs[2], cv0, cv1, cv2,
+                &pitch_bits, &yaw_bits);
+            if (angle_valid) {
+                stack_updated = dfm_bullet_track_write_stack_args(
+                    new_sp + 0x60ULL, pitch_bits, yaw_bits);
+                if (stack_updated) {
+                    fpst->vregs[3] = (fpst->vregs[3] & mask) |
+                                     (__uint128_t)pitch_bits;
+                    fpst->vregs[4] = (fpst->vregs[4] & mask) |
+                                     (__uint128_t)yaw_bits;
+                    smp_wmb();
+                    set_thread_flag(TIF_FOREIGN_FPSTATE);
+                    injected = true;
+                    atomic64_inc(&dfm_bullet_track_injections);
+                }
+            }
+        }
+
+        if (hit == 1 || (hit & 0xFFULL) == 0ULL)
+            NBG_INFO("dfm bullet hook pid=%d hit=%llu pc=0x%llx target=%d source=%d angle=%d stack=%d frame=%d fp=%d injected=%d total=%lld\n",
+                     current ? current->pid : 0,
+                     (unsigned long long)hit,
+                     (unsigned long long)ctx->target_vaddr,
+                     target_valid ? 1 : 0, source_valid ? 1 : 0,
+                     angle_valid ? 1 : 0, stack_updated ? 1 : 0,
+                     frame_ok ? 1 : 0,
+                     fp_ready ? 1 : 0, injected ? 1 : 0,
+                     (long long)atomic64_read(
+                         &dfm_bullet_track_injections));
         break;
     }
     case 24: {
@@ -3248,6 +3461,10 @@ static bool shadow_exact_hook_spec(uint32_t hook_type,
         *expected_insn = DFM_OUTLINE_FLAGS_LOAD_INSN;
         *expected_rva = DFM_OUTLINE_FLAGS_DRAW_RVA;
         return true;
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
+        *expected_insn = DFM_BULLET_TRACK_INSN;
+        *expected_rva = DFM_BULLET_TRACK_RVA;
+        return true;
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
         *expected_insn = RMCN_FREE_VIEW_EPILOGUE_INSN;
         *expected_rva = RMCN_FREE_VIEW_EPILOGUE_RVA;
@@ -3289,6 +3506,8 @@ static bool shadow_ctx_can_emulate(const struct rot_ctx *ctx, uint32_t hook_type
                !ctx->dec_pc_rel && ctx->dec_size == 1 &&
                ctx->dec_rn == 20 && ctx->dec_rt == 8 &&
                ctx->dec_offset == DFM_MESH_EFFECT_FLAGS_OFFSET;
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
+        return true;
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
         return ctx->module_base >= RMCN_USER_MIN_ADDR;
     default:

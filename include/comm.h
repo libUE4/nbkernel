@@ -372,6 +372,10 @@ typedef struct _ShadowHookReq {
  * raises the bit in the destination register, never writes target memory. */
 #define NBG_SHADOW_DFM_OUTLINE_FLAGS_TYPE 41U
 
+/* DFM projectile direction bridge. custom_rot[0..2] carry target XYZ; the
+ * callback computes and writes the shot's pitch/yaw while preserving S5. */
+#define NBG_SHADOW_DFM_BULLET_TRACK_TYPE 42U
+
 /* RMCN ClientPlayerGo update epilogue. One execution breakpoint routes the
  * RMCN observer/free-view hook. */
 #define NBG_SHADOW_RMCN_FREE_VIEW_TYPE 32U
