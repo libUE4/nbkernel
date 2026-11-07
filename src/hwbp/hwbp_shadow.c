@@ -14,6 +14,8 @@
  *                           的持久 geometry 尺寸放大，供后续窄相直接读取。
  *   case 31 DFM 人物高亮     仿真 LDR X8,[X20,#0x700]，对敌方角色
  *                           网格替换轮廓材质并同步渲染标志。
+ *   case 42 DFM 弹道追踪     仿真函数入口 STP X28,X27,[SP,#-0x60]!
+ *                           并按需注入 S3/S4/S5 方向。
  *   case 32 RMCN 自由视角  仿真 MgrCamera.RenderUpdate 返回前的 LDP，
  *                           并在命中时调用游戏观察者模式接口。
  *   case 34 RMCN 第三人称    默认仿真 RenderUpdate 首指令并记录命中；
@@ -205,6 +207,8 @@ static DEFINE_MUTEX(rot_hook_mutex);
 #define DFM_OUTLINE_FLAGS_DEPTH_RVA      0x1080AA18ULL /* 第三处 LDRB W8,[X20,#0x728]，实测；当前未使用 */
 #define DFM_EFFECT_PASS_DRAW_BIT         0x01U
 #define DFM_EFFECT_PASS_DEPTH_BIT        0x04U
+#define DFM_BULLET_TRACK_INSN             0xA9BA6FFCU /* STP X28,X27,[SP,#-0x60]! */
+#define DFM_BULLET_TRACK_RVA              0x0B85AFBCULL
 #define DFM_COMPONENT_OWNER_OFFSET       0x0E8ULL
 #define DFM_CHARACTER_NET_UPDATE_OFFSET  0x150ULL
 #define DFM_CHARACTER_MAIN_MESH_OFFSET   0x3D0ULL
@@ -443,6 +447,7 @@ static bool rot_hook_type_supported(uint32_t hook_type)
     case NBG_SHADOW_FP_LDP_SCALE_HOOK_TYPE:
     case NBG_SHADOW_DFM_OUTLINE_RENDER_TYPE:
     case NBG_SHADOW_DFM_OUTLINE_FLAGS_TYPE:
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
     case NBG_SHADOW_RMCN_ROTATION_INPUT_TYPE:
     case NBG_SHADOW_RMCN_CROSSHAIR_INPUT_TYPE:
@@ -2244,6 +2249,38 @@ static void rot_hook_callback(struct pt_regs *regs, void *priv)
                         ((regs->regs[8] & 0xFFULL) | DFM_EFFECT_PASS_DRAW_BIT);
         break;
     }
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE: {
+        uint64_t new_sp;
+        struct user_fpsimd_state *fpst;
+        const __uint128_t mask = ~(__uint128_t)0xFFFFFFFFUL;
+        const bool target_valid = rmcn_float_is_finite(cv0) &&
+                                   rmcn_float_is_finite(cv1) &&
+                                   rmcn_float_is_finite(cv2);
+
+        /* The breakpoint core skips the function-entry STP. Reproduce its
+         * pre-decrement and pair store before the callee sees the new frame. */
+        if (regs->sp < 0x60ULL)
+            break;
+        new_sp = regs->sp - 0x60ULL;
+        if (!rmcn_put_user_u64(new_sp, regs->regs[28]) ||
+            !rmcn_put_user_u64(new_sp + sizeof(uint64_t), regs->regs[27]))
+            break;
+        regs->sp = new_sp;
+
+        if (!target_valid || !current ||
+            (current->flags & (PF_EXITING | PF_KTHREAD)) ||
+            !fpsimd_save_flush_fn)
+            break;
+
+        fpsimd_save_flush_fn();
+        fpst = &current->thread.uw.fpsimd_state;
+        fpst->vregs[3] = (fpst->vregs[3] & mask) | (__uint128_t)cv0;
+        fpst->vregs[4] = (fpst->vregs[4] & mask) | (__uint128_t)cv1;
+        fpst->vregs[5] = (fpst->vregs[5] & mask) | (__uint128_t)cv2;
+        smp_wmb();
+        set_thread_flag(TIF_FOREIGN_FPSTATE);
+        break;
+    }
     case 24: {
         const uint64_t hit = atomic64_inc_return(&dfm_slot_trace_hits);
 
@@ -3248,6 +3285,10 @@ static bool shadow_exact_hook_spec(uint32_t hook_type,
         *expected_insn = DFM_OUTLINE_FLAGS_LOAD_INSN;
         *expected_rva = DFM_OUTLINE_FLAGS_DRAW_RVA;
         return true;
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
+        *expected_insn = DFM_BULLET_TRACK_INSN;
+        *expected_rva = DFM_BULLET_TRACK_RVA;
+        return true;
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
         *expected_insn = RMCN_FREE_VIEW_EPILOGUE_INSN;
         *expected_rva = RMCN_FREE_VIEW_EPILOGUE_RVA;
@@ -3289,6 +3330,8 @@ static bool shadow_ctx_can_emulate(const struct rot_ctx *ctx, uint32_t hook_type
                !ctx->dec_pc_rel && ctx->dec_size == 1 &&
                ctx->dec_rn == 20 && ctx->dec_rt == 8 &&
                ctx->dec_offset == DFM_MESH_EFFECT_FLAGS_OFFSET;
+    case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
+        return true;
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
         return ctx->module_base >= RMCN_USER_MIN_ADDR;
     default:
