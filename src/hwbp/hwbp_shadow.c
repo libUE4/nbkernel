@@ -239,6 +239,8 @@ static fpsimd_save_flush_fn_t fpsimd_save_flush_fn;
 static atomic64_t dfm_slot_trace_hits = ATOMIC64_INIT(0);
 static atomic64_t dfm_formula_trace_hits = ATOMIC64_INIT(0);
 static atomic64_t dfm_index_trace_hits = ATOMIC64_INIT(0);
+static atomic64_t dfm_bullet_track_hits = ATOMIC64_INIT(0);
+static atomic64_t dfm_bullet_track_injections = ATOMIC64_INIT(0);
 static bool dfm_index_trace_insn_valid(uint32_t insn)
 {
     uint32_t rt;
@@ -2256,29 +2258,46 @@ static void rot_hook_callback(struct pt_regs *regs, void *priv)
         const bool target_valid = rmcn_float_is_finite(cv0) &&
                                    rmcn_float_is_finite(cv1) &&
                                    rmcn_float_is_finite(cv2);
+        const bool fp_ready = current &&
+                              !(current->flags & (PF_EXITING | PF_KTHREAD)) &&
+                              fpsimd_save_flush_fn;
+        const uint64_t hit = atomic64_inc_return(&dfm_bullet_track_hits);
+        bool frame_ok = false;
+        bool injected = false;
 
         /* The breakpoint core skips the function-entry STP. Reproduce its
          * pre-decrement and pair store before the callee sees the new frame. */
-        if (regs->sp < 0x60ULL)
-            break;
-        new_sp = regs->sp - 0x60ULL;
-        if (!rmcn_put_user_u64(new_sp, regs->regs[28]) ||
-            !rmcn_put_user_u64(new_sp + sizeof(uint64_t), regs->regs[27]))
-            break;
-        regs->sp = new_sp;
+        if (regs->sp >= 0x60ULL) {
+            new_sp = regs->sp - 0x60ULL;
+            if (rmcn_put_user_u64(new_sp, regs->regs[28]) &&
+                rmcn_put_user_u64(new_sp + sizeof(uint64_t),
+                                  regs->regs[27])) {
+                regs->sp = new_sp;
+                frame_ok = true;
+            }
+        }
 
-        if (!target_valid || !current ||
-            (current->flags & (PF_EXITING | PF_KTHREAD)) ||
-            !fpsimd_save_flush_fn)
-            break;
+        if (frame_ok && target_valid && fp_ready) {
+            fpsimd_save_flush_fn();
+            fpst = &current->thread.uw.fpsimd_state;
+            fpst->vregs[3] = (fpst->vregs[3] & mask) | (__uint128_t)cv0;
+            fpst->vregs[4] = (fpst->vregs[4] & mask) | (__uint128_t)cv1;
+            fpst->vregs[5] = (fpst->vregs[5] & mask) | (__uint128_t)cv2;
+            smp_wmb();
+            set_thread_flag(TIF_FOREIGN_FPSTATE);
+            injected = true;
+            atomic64_inc(&dfm_bullet_track_injections);
+        }
 
-        fpsimd_save_flush_fn();
-        fpst = &current->thread.uw.fpsimd_state;
-        fpst->vregs[3] = (fpst->vregs[3] & mask) | (__uint128_t)cv0;
-        fpst->vregs[4] = (fpst->vregs[4] & mask) | (__uint128_t)cv1;
-        fpst->vregs[5] = (fpst->vregs[5] & mask) | (__uint128_t)cv2;
-        smp_wmb();
-        set_thread_flag(TIF_FOREIGN_FPSTATE);
+        if (hit == 1 || (hit & 0xFFULL) == 0ULL)
+            NBG_INFO("dfm bullet hook pid=%d hit=%llu pc=0x%llx active=%d frame=%d fp=%d injected=%d total=%lld\n",
+                     current ? current->pid : 0,
+                     (unsigned long long)hit,
+                     (unsigned long long)ctx->target_vaddr,
+                     target_valid ? 1 : 0, frame_ok ? 1 : 0,
+                     fp_ready ? 1 : 0, injected ? 1 : 0,
+                     (long long)atomic64_read(
+                         &dfm_bullet_track_injections));
         break;
     }
     case 24: {
