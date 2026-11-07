@@ -702,9 +702,32 @@ static inline uint64_t dfm_q30_abs(int64_t value)
 
 static inline int64_t dfm_q30_normalize(int64_t value, uint64_t scale)
 {
+    uint64_t remainder;
+    uint64_t result = 0;
+    int bit;
+
     if (!scale)
         return 0;
-    return (int64_t)(((__int128)value * RMCN_Q30_ONE) / scale);
+
+    remainder = dfm_q30_abs(value);
+    if (remainder >= scale)
+        return value < 0 ? -RMCN_Q30_ONE : RMCN_Q30_ONE;
+
+    /* Generate 30 fractional bits with overflow-safe binary long division.
+     * A 128-bit divide emits __divti3, which the Android kernel does not
+     * export for loadable modules. Since remainder < scale, the comparison
+     * against scale - remainder lets us double without overflowing u64. */
+    for (bit = 0; bit < 30; ++bit) {
+        result <<= 1;
+        if (remainder >= scale - remainder) {
+            remainder -= scale - remainder;
+            result |= 1ULL;
+        } else {
+            remainder += remainder;
+        }
+    }
+
+    return value < 0 ? -(int64_t)result : (int64_t)result;
 }
 
 static bool dfm_bullet_track_compute_angles(
@@ -774,8 +797,9 @@ static bool dfm_bullet_track_compute_angles(
               RMCN_Q30_TWO_PI - RMCN_Q30_HALF_PI :
               RMCN_Q30_HALF_PI;
     } else {
-        yaw_ratio = (int64_t)(((__int128)source_dy * RMCN_Q30_ONE) /
-                              source_dx);
+        /* source_dy and RMCN_Q30_ONE are both bounded by 2^30, so this
+         * intermediate fits signed 64-bit and avoids an unexported helper. */
+        yaw_ratio = (source_dy * RMCN_Q30_ONE) / source_dx;
         yaw = rmcn_q30_atan2(yaw_ratio, RMCN_Q30_ONE);
         if (source_dx >= 0)
             yaw += RMCN_Q30_PI;
