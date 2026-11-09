@@ -1537,7 +1537,9 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
 
         static_assert(offsetof(HwbpCaptureReq, match_enabled) ==
                       NBG_HWBP_CAPTURE_V1_SIZE);
-        static_assert(sizeof(HwbpCaptureReq) == NBG_HWBP_CAPTURE_V2_SIZE);
+        static_assert(offsetof(HwbpCaptureReq, stack_offsets) ==
+                      NBG_HWBP_CAPTURE_V2_SIZE);
+        static_assert(sizeof(HwbpCaptureReq) == NBG_HWBP_CAPTURE_V3_SIZE);
         if (copy_from_user(&abi_version, (void __user *)arg,
                            sizeof(abi_version)))
             return -EFAULT;
@@ -1545,8 +1547,11 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         case NBG_HWBP_CAPTURE_ABI_VERSION_1:
             request_size = NBG_HWBP_CAPTURE_V1_SIZE;
             break;
-        case NBG_HWBP_CAPTURE_ABI_VERSION:
+        case NBG_HWBP_CAPTURE_ABI_VERSION_2:
             request_size = NBG_HWBP_CAPTURE_V2_SIZE;
+            break;
+        case NBG_HWBP_CAPTURE_ABI_VERSION_3:
+            request_size = NBG_HWBP_CAPTURE_V3_SIZE;
             break;
         default:
             return -EPROTO;

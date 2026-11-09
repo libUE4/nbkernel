@@ -1,8 +1,6 @@
 name: Build NBG.ko
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
     inputs:
       kmi:
@@ -123,7 +121,7 @@ jobs:
   package:
     name: Package and publish release
     needs: [prepare, build]
-    if: needs.prepare.outputs.single == 'false'
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -497,13 +497,20 @@ typedef struct _HwbpCaps {
  * verified as BR X8, which the callback reproduces exactly after sampling the
  * pre-branch register state for the offline segment emulator. */
 #define NBG_HWBP_CAPTURE_ABI_VERSION_1 1U
-#define NBG_HWBP_CAPTURE_ABI_VERSION 2U
+#define NBG_HWBP_CAPTURE_ABI_VERSION_2 2U
+#define NBG_HWBP_CAPTURE_ABI_VERSION_3 3U
+#define NBG_HWBP_CAPTURE_ABI_VERSION NBG_HWBP_CAPTURE_ABI_VERSION_3
 #define NBG_HWBP_CAPTURE_V1_SIZE     344U
 #define NBG_HWBP_CAPTURE_V2_SIZE     600U
+#define NBG_HWBP_CAPTURE_V3_SIZE     680U
 #define NBG_HWBP_CAPTURE_POINTEE_COUNT 4U
 #define NBG_HWBP_CAPTURE_POINTEE_SIZE 32U
 #define NBG_HWBP_CAPTURE_STACK_SIZE  64U
 #define NBG_HWBP_CAPTURE_STACK_VALID (1U << 4)
+#define NBG_HWBP_CAPTURE_EXTRA_COUNT 2U
+#define NBG_HWBP_CAPTURE_EXTRA_SIZE  16U
+#define NBG_HWBP_CAPTURE_MAX_STACK_OFFSET 0x2000U
+#define NBG_HWBP_CAPTURE_FRAME_LINK_VALID (1U << 2)
 #define NBG_HWBP_CAPTURE_ARM         1U
 #define NBG_HWBP_CAPTURE_READ        2U
 #define NBG_HWBP_CAPTURE_CANCEL      3U
@@ -548,6 +555,17 @@ typedef struct _HwbpCaptureReq {
     uint8_t pointee_data[NBG_HWBP_CAPTURE_POINTEE_COUNT][NBG_HWBP_CAPTURE_POINTEE_SIZE];
     uint64_t stack_address;
     uint8_t stack_data[NBG_HWBP_CAPTURE_STACK_SIZE];
+    /* v3: two aligned SP-relative windows and the saved caller LR at FP+8.
+     * extra_valid_mask bits 0..1 cover the windows; bit 2 covers frame_link.
+     * As in v2, each valid field was copied before this trapped EL0 thread
+     * resumed, without a target write or page fault. */
+    uint32_t stack_offsets[NBG_HWBP_CAPTURE_EXTRA_COUNT];
+    uint32_t extra_valid_mask;
+    uint32_t reserved_v3;
+    uint64_t extra_addresses[NBG_HWBP_CAPTURE_EXTRA_COUNT];
+    uint8_t extra_data[NBG_HWBP_CAPTURE_EXTRA_COUNT][NBG_HWBP_CAPTURE_EXTRA_SIZE];
+    uint64_t frame_link_address;
+    uint64_t frame_link;
 } HwbpCaptureReq, *PHwbpCaptureReq;
 
 typedef struct _IntValue {

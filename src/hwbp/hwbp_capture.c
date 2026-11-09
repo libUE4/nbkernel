@@ -47,6 +47,13 @@ struct hwbp_capture_context {
     uint8_t pointee_data[NBG_HWBP_CAPTURE_POINTEE_COUNT][NBG_HWBP_CAPTURE_POINTEE_SIZE];
     uint64_t stack_address;
     uint8_t stack_data[NBG_HWBP_CAPTURE_STACK_SIZE];
+    bool capture_extra;
+    uint32_t stack_offsets[NBG_HWBP_CAPTURE_EXTRA_COUNT];
+    uint32_t extra_valid_mask;
+    uint64_t extra_addresses[NBG_HWBP_CAPTURE_EXTRA_COUNT];
+    uint8_t extra_data[NBG_HWBP_CAPTURE_EXTRA_COUNT][NBG_HWBP_CAPTURE_EXTRA_SIZE];
+    uint64_t frame_link_address;
+    uint64_t frame_link;
 };
 
 static struct hwbp_capture_context capture;
@@ -127,6 +134,33 @@ static void hwbp_capture_pointees(struct pt_regs *regs)
         capture.pointee_valid_mask |= NBG_HWBP_CAPTURE_STACK_VALID;
 }
 
+static void hwbp_capture_extra_windows(struct pt_regs *regs)
+{
+    const unsigned long stack_address = untagged_addr(regs->sp);
+    const unsigned long frame_address = untagged_addr(regs->regs[29]);
+    unsigned int i;
+
+    for (i = 0; i < NBG_HWBP_CAPTURE_EXTRA_COUNT; ++i) {
+        const unsigned long offset = capture.stack_offsets[i];
+        unsigned long address;
+
+        if (stack_address > ~0UL - offset)
+            continue;
+        address = stack_address + offset;
+        capture.extra_addresses[i] = address;
+        if (hwbp_capture_read_user_words(address, capture.extra_data[i],
+                                         NBG_HWBP_CAPTURE_EXTRA_SIZE))
+            capture.extra_valid_mask |= 1U << i;
+    }
+    if (frame_address <= ~0UL - sizeof(uint64_t)) {
+        capture.frame_link_address = frame_address + sizeof(uint64_t);
+        if (hwbp_capture_read_user_words(capture.frame_link_address,
+                                         (uint8_t *)&capture.frame_link,
+                                         sizeof(capture.frame_link)))
+            capture.extra_valid_mask |= NBG_HWBP_CAPTURE_FRAME_LINK_VALID;
+    }
+}
+
 /* raw HWBP advances PC by four after callbacks. Storing X8 - 4 means that
  * advance lands at the exact BR X8 destination, including unmatched hits. */
 static void hwbp_capture_callback(struct pt_regs *regs, void *private)
@@ -155,6 +189,8 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
         capture.flags = NBG_HWBP_CAPTURE_FLAG_BRANCH_EMULATED;
         if (capture.capture_pointees)
             hwbp_capture_pointees(regs);
+        if (capture.capture_extra)
+            hwbp_capture_extra_windows(regs);
         smp_store_release(&capture.state.counter, NBG_HWBP_CAPTURE_HIT);
         schedule_work(&capture.retire_work);
     }
@@ -222,6 +258,14 @@ static void hwbp_capture_fill(HwbpCaptureReq *request)
     memset(request->pointee_data, 0, sizeof(request->pointee_data));
     request->stack_address = 0;
     memset(request->stack_data, 0, sizeof(request->stack_data));
+    memcpy(request->stack_offsets, capture.stack_offsets,
+           sizeof(request->stack_offsets));
+    request->extra_valid_mask = 0;
+    request->reserved_v3 = 0;
+    memset(request->extra_addresses, 0, sizeof(request->extra_addresses));
+    memset(request->extra_data, 0, sizeof(request->extra_data));
+    request->frame_link_address = 0;
+    request->frame_link = 0;
     if (state == NBG_HWBP_CAPTURE_HIT) {
         request->hit_count = capture.hits;
         request->hit_tid = capture.hit_tid;
@@ -240,6 +284,13 @@ static void hwbp_capture_fill(HwbpCaptureReq *request)
                sizeof(request->pointee_data));
         request->stack_address = capture.stack_address;
         memcpy(request->stack_data, capture.stack_data, sizeof(request->stack_data));
+        request->extra_valid_mask = capture.extra_valid_mask;
+        memcpy(request->extra_addresses, capture.extra_addresses,
+               sizeof(request->extra_addresses));
+        memcpy(request->extra_data, capture.extra_data,
+               sizeof(request->extra_data));
+        request->frame_link_address = capture.frame_link_address;
+        request->frame_link = capture.frame_link;
     }
 }
 
@@ -267,6 +318,13 @@ static void hwbp_capture_reset_locked(void)
     memset(capture.pointee_data, 0, sizeof(capture.pointee_data));
     capture.stack_address = 0;
     memset(capture.stack_data, 0, sizeof(capture.stack_data));
+    capture.capture_extra = false;
+    memset(capture.stack_offsets, 0, sizeof(capture.stack_offsets));
+    capture.extra_valid_mask = 0;
+    memset(capture.extra_addresses, 0, sizeof(capture.extra_addresses));
+    memset(capture.extra_data, 0, sizeof(capture.extra_data));
+    capture.frame_link_address = 0;
+    capture.frame_link = 0;
     atomic_set(&capture.state, NBG_HWBP_CAPTURE_IDLE);
 }
 
@@ -283,11 +341,22 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
         (request->target_vaddr & 3U) ||
         request->expected_instruction != NBG_HWBP_CAPTURE_BR_X8)
         return -EINVAL;
-    if (request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION &&
+    if (request->abi_version >= NBG_HWBP_CAPTURE_ABI_VERSION_2 &&
         (request->match_enabled > 1U ||
          (request->match_enabled && request->match_register >= 31U) ||
          request->reserved_v2))
         return -EINVAL;
+    if (request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION_3) {
+        unsigned int i;
+
+        if (request->reserved_v3)
+            return -EINVAL;
+        for (i = 0; i < NBG_HWBP_CAPTURE_EXTRA_COUNT; ++i) {
+            if ((request->stack_offsets[i] & 7U) ||
+                request->stack_offsets[i] > NBG_HWBP_CAPTURE_MAX_STACK_OFFSET)
+                return -EINVAL;
+        }
+    }
     timeout = request->timeout_ms ? request->timeout_ms :
         HWBP_CAPTURE_DEFAULT_TIMEOUT_MS;
     if (timeout > HWBP_CAPTURE_MAX_TIMEOUT_MS)
@@ -321,7 +390,11 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     capture.tgid = tgid;
     capture.tid = request->tid;
     capture.target = request->target_vaddr;
-    capture.capture_pointees = request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION;
+    capture.capture_pointees = request->abi_version >= NBG_HWBP_CAPTURE_ABI_VERSION_2;
+    capture.capture_extra = request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION_3;
+    if (capture.capture_extra)
+        memcpy(capture.stack_offsets, request->stack_offsets,
+               sizeof(capture.stack_offsets));
     if (capture.capture_pointees && request->match_enabled) {
         capture.match_enabled = 1;
         capture.match_register = request->match_register;
@@ -381,8 +454,17 @@ int hwbp_capture_control(HwbpCaptureReq *request)
 
     if (!request ||
         (request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION_1 &&
-         request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION))
+         request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION_2 &&
+         request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION_3))
         return -EPROTO;
+    /* Do not echo caller-supplied stale snapshot bytes on validation errors
+     * or an unknown action. Offsets/reserved_v3 remain inputs until ARM has
+     * validated them; successful fills return the active configuration. */
+    request->extra_valid_mask = 0;
+    memset(request->extra_addresses, 0, sizeof(request->extra_addresses));
+    memset(request->extra_data, 0, sizeof(request->extra_data));
+    request->frame_link_address = 0;
+    request->frame_link = 0;
     switch (request->action) {
     case NBG_HWBP_CAPTURE_ARM:
         ret = hwbp_capture_arm(request);
