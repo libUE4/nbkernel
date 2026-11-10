@@ -39,30 +39,56 @@ static bool gyro_caller_is_system_server(void)
     return leader && strncmp(leader->comm, "system_server", TASK_COMM_LEN) == 0;
 }
 
+static bool gyro_read_user_u32(unsigned long address, u32 *value)
+{
+    int ret;
+
+    if (!value || address < 0x10000UL ||
+        !access_ok((const void __user *)address, sizeof(*value)))
+        return false;
+    pagefault_disable();
+    ret = __get_user(*value, (const u32 __user *)address);
+    pagefault_enable();
+    return ret == 0;
+}
+
+static bool gyro_write_user_u32(unsigned long address, u32 value)
+{
+    int ret;
+
+    if (address < 0x10000UL ||
+        !access_ok((void __user *)address, sizeof(value)))
+        return false;
+    pagefault_disable();
+    ret = __put_user(value, (u32 __user *)address);
+    pagefault_enable();
+    return ret == 0;
+}
+
 static void gyro_update_event(unsigned long event,
                               const struct nbg_gyro_state *state)
 {
-    s32 type;
-    u32 xy[2];
+    u32 type_bits, x_bits, y_bits;
     u32 result_x, result_y;
-    bool selected = false;
+    s32 type;
 
-    if (copy_from_user_nofault(&type,
-            (const void __user *)(event + NBG_GYRO_EVENT_TYPE_OFFSET), sizeof(type)))
+    if (event > ULONG_MAX - NBG_GYRO_EVENT_DATA_OFFSET - 2 * sizeof(u32) ||
+        !gyro_read_user_u32(event + NBG_GYRO_EVENT_TYPE_OFFSET, &type_bits))
         return;
-    selected = nbg_gyro_type_selected(type, state->type_mask);
-    if (!selected || (!state->delta_x_q32 && !state->delta_y_q32))
+    memcpy(&type, &type_bits, sizeof(type));
+    if (!nbg_gyro_type_selected(type, state->type_mask) ||
+        (!state->delta_x_q32 && !state->delta_y_q32))
         return;
-    if (copy_from_user_nofault(xy,
-            (const void __user *)(event + NBG_GYRO_EVENT_DATA_OFFSET), sizeof(xy)))
+    if (!gyro_read_user_u32(event + NBG_GYRO_EVENT_DATA_OFFSET, &x_bits) ||
+        !gyro_read_user_u32(event + NBG_GYRO_EVENT_DATA_OFFSET + sizeof(u32),
+                            &y_bits))
         return;
-    if (nbg_gyro_add_xy(xy[0], xy[1], state->delta_x_q32,
+    if (nbg_gyro_add_xy(x_bits, y_bits, state->delta_x_q32,
                         state->delta_y_q32, &result_x, &result_y) != 0)
         return;
-    xy[0] = result_x;
-    xy[1] = result_y;
-    if (!copy_to_user_nofault((void __user *)(event + NBG_GYRO_EVENT_DATA_OFFSET),
-                              xy, sizeof(xy)))
+    if (gyro_write_user_u32(event + NBG_GYRO_EVENT_DATA_OFFSET, result_x) &&
+        gyro_write_user_u32(event + NBG_GYRO_EVENT_DATA_OFFSET + sizeof(u32),
+                            result_y))
         atomic64_inc(&gyro_modified_events);
 }
 
