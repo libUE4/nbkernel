@@ -13,7 +13,7 @@
 
 struct shadow_req {
     int32_t  pid;
-    uint64_t vaddr;             /* 目标 (被改写) 地址,留作扩展 */
+    uint64_t vaddr;             /* Type 32 observer; type-dependent auxiliary otherwise. */
     uint64_t target_vaddr;      /* 实际下断点的地址 */
     uint32_t custom_rot[3];     /* 业务 payload(各 hook 类型语义不同) */
     int32_t  is_rot_hook;       /* 支持 1/2/4/5/7/8/24/25/28/29/31/32/33/34/35/38/39/40 */

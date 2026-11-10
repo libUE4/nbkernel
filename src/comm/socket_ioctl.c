@@ -34,6 +34,8 @@
 #include "process.h"
 #include "query.h"
 #include "touch.h"
+#include "gyro.h"
+#include "udp_capture.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
 #include "hwbp_shadow.h"
@@ -1571,6 +1573,20 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
             return -EFAULT;
         return 0;
     }
+    case OP_GYRO_CONFIG: {
+        NBG_GYRO_CONFIG req;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        ret = nbg_gyro_configure(&req);
+        if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+            return -EFAULT;
+        return ret;
+    }
+    case OP_UDP_CAPTURE_INIT:
+    case OP_UDP_CAPTURE_READ:
+    case OP_UDP_CAPTURE_STOP:
+        return nbg_udp_capture_ioctl(cmd, arg, ctx);
     case OP_HIDE_KGSL:
         return hide_kgsl_install();
     case OP_UNHIDE_KGSL:
@@ -1620,6 +1636,7 @@ static int nbg_release(struct socket *sock)
         return 0;
     ctx = (struct nbg_sock_ctx *)sk->sk_user_data;
     if (ctx && ctx->authed) {
+        nbg_udp_capture_release(ctx);
         nbg_input_snapshot_release(&ctx->readonly_input_subscribed);
         mutex_lock(&nbg_touch_owner_lock);
         touch_release_slots(ctx->touch_slots);
