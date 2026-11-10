@@ -55,12 +55,17 @@ static void print_bytes(const uint8_t *bytes, size_t size)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s PID LIBUE4_BASE\n", argv[0]);
+    if (argc < 3 || argc > 4) {
+        std::fprintf(stderr, "usage: %s PID LIBUE4_BASE [eor|cache]\n", argv[0]);
         return 2;
     }
     const int pid = std::atoi(argv[1]);
     const uint64_t base = std::strtoull(argv[2], nullptr, 0);
+    const bool cache_probe = argc == 4 && std::strcmp(argv[3], "cache") == 0;
+    if (argc == 4 && !cache_probe && std::strcmp(argv[3], "eor") != 0) {
+        std::fprintf(stderr, "mode must be eor or cache\n");
+        return 2;
+    }
     if (pid <= 0 || base < 0x10000U) {
         std::fprintf(stderr, "invalid pid/base\n");
         return 2;
@@ -74,17 +79,22 @@ int main(int argc, char **argv)
 
     HwbpCaptureReq request{};
     request.abi_version = NBG_HWBP_CAPTURE_ABI_VERSION;
-    request.action = NBG_HWBP_CAPTURE_ARM_KDF;
+    request.action = cache_probe ? NBG_HWBP_CAPTURE_ARM_KDF_CACHE
+                                 : NBG_HWBP_CAPTURE_ARM_KDF;
     request.pid = pid;
-    request.target_vaddr = base + 0x1122a94cULL;
-    request.expected_instruction = NBG_HWBP_CAPTURE_KDF_EOR;
+    request.target_vaddr = base + (cache_probe ? 0x1122a81cULL
+                                               : 0x1122a94cULL);
+    request.expected_instruction = cache_probe
+                                       ? NBG_HWBP_CAPTURE_KDF_CACHE_MOV
+                                       : NBG_HWBP_CAPTURE_KDF_EOR;
     request.timeout_ms = 120000U;
     if (ioctl(fd, OP_HWBP_CAPTURE, &request) != 0) {
         std::perror("arm KDF driver breakpoint");
         close(fd);
         return 1;
     }
-    std::printf("armed pid=%d target=0x%llx state=%u\n", pid,
+    std::printf("armed mode=%s pid=%d target=0x%llx state=%u\n",
+                cache_probe ? "cache" : "eor", pid,
                 static_cast<unsigned long long>(request.target_vaddr),
                 request.state);
     std::fflush(stdout);
@@ -109,6 +119,10 @@ int main(int argc, char **argv)
                         static_cast<unsigned long long>(request.registers[10]),
                         static_cast<unsigned long long>(request.registers[19]),
                         static_cast<unsigned long long>(request.registers[25]));
+            if (cache_probe)
+                std::printf("x22=0x%016llx cache_object=0x%016llx\n",
+                            static_cast<unsigned long long>(request.registers[22]),
+                            static_cast<unsigned long long>(request.registers[9]));
             if (request.pointee_valid_mask & 1U) {
                 std::printf("srv_stack=0x%llx srv32=",
                             static_cast<unsigned long long>(

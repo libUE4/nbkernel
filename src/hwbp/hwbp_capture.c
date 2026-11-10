@@ -44,6 +44,7 @@ struct hwbp_capture_context {
     uint64_t pstate;
 #ifdef NBG_DEBUG
     bool capture_kdf;
+    bool capture_kdf_cache;
 #endif
     bool capture_pointees;
     uint32_t match_enabled;
@@ -140,6 +141,7 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
 {
 #ifdef NBG_DEBUG
     const bool capture_kdf = READ_ONCE(capture.capture_kdf);
+    const bool capture_kdf_cache = READ_ONCE(capture.capture_kdf_cache);
 #endif
     const uint64_t branch_target = regs->regs[8];
 
@@ -171,6 +173,14 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
                     capture.pointee_address[0], capture.pointee_data[0], 32U))
                 capture.pointee_valid_mask |= 1U;
             capture.flags = NBG_HWBP_CAPTURE_FLAG_KDF_EOR_EMULATED;
+        } else if (capture_kdf_cache) {
+            capture.pointee_address[0] =
+                untagged_addr(regs->regs[9]);
+            if (hwbp_capture_read_user_words(
+                    capture.pointee_address[0], capture.pointee_data[0], 32U))
+                capture.pointee_valid_mask |= 1U;
+            capture.flags =
+                NBG_HWBP_CAPTURE_FLAG_KDF_CACHE_MOV_EMULATED;
         } else
 #endif
         if (capture.capture_pointees)
@@ -181,6 +191,10 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
 #ifdef NBG_DEBUG
     if (capture_kdf) {
         regs->regs[12] = regs->regs[9] ^ regs->regs[25];
+        return;
+    }
+    if (capture_kdf_cache) {
+        regs->regs[8] = regs->regs[22];
         return;
     }
 #endif
@@ -230,7 +244,9 @@ static void hwbp_capture_fill(HwbpCaptureReq *request)
 #ifdef NBG_DEBUG
     request->expected_instruction = capture.capture_kdf
                                         ? NBG_HWBP_CAPTURE_KDF_EOR
-                                        : NBG_HWBP_CAPTURE_BR_X8;
+                                        : capture.capture_kdf_cache
+                                              ? NBG_HWBP_CAPTURE_KDF_CACHE_MOV
+                                              : NBG_HWBP_CAPTURE_BR_X8;
 #else
     request->expected_instruction = NBG_HWBP_CAPTURE_BR_X8;
 #endif
@@ -292,6 +308,7 @@ static void hwbp_capture_reset_locked(void)
     capture.pstate = 0;
 #ifdef NBG_DEBUG
     capture.capture_kdf = false;
+    capture.capture_kdf_cache = false;
 #endif
     capture.capture_pointees = false;
     capture.match_enabled = 0;
@@ -313,9 +330,13 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     uint32_t timeout;
 #ifdef NBG_DEBUG
     bool capture_kdf = request->action == NBG_HWBP_CAPTURE_ARM_KDF;
+    bool capture_kdf_cache =
+        request->action == NBG_HWBP_CAPTURE_ARM_KDF_CACHE;
     uint32_t expected_instruction = capture_kdf
                                        ? NBG_HWBP_CAPTURE_KDF_EOR
-                                       : NBG_HWBP_CAPTURE_BR_X8;
+                                       : capture_kdf_cache
+                                             ? NBG_HWBP_CAPTURE_KDF_CACHE_MOV
+                                             : NBG_HWBP_CAPTURE_BR_X8;
 #else
     uint32_t expected_instruction = NBG_HWBP_CAPTURE_BR_X8;
 #endif
@@ -373,6 +394,7 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     capture.capture_pointees = request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION;
 #ifdef NBG_DEBUG
     capture.capture_kdf = capture_kdf;
+    capture.capture_kdf_cache = capture_kdf_cache;
 #endif
     if (capture.capture_pointees && request->match_enabled) {
         capture.match_enabled = 1;
@@ -441,6 +463,9 @@ int hwbp_capture_control(HwbpCaptureReq *request)
         break;
 #ifdef NBG_DEBUG
     case NBG_HWBP_CAPTURE_ARM_KDF:
+        ret = hwbp_capture_arm(request);
+        break;
+    case NBG_HWBP_CAPTURE_ARM_KDF_CACHE:
         ret = hwbp_capture_arm(request);
         break;
 #endif
