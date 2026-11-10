@@ -95,7 +95,27 @@ enum OPERATIONS {
     OP_QUERY_SIGNAL     = 0x95B,
     /* 用目标线程的 APGA 密钥执行 PACGA，解析受 PAC 保护的指针。 */
     OP_EXECUTE_PACGA    = 0x95C,
+    OP_GYRO_CONFIG      = 0x95D,
 };
+
+#define NBG_GYRO_ABI_VERSION 1U
+#define NBG_GYRO_TYPE_GYROSCOPE 0x01U
+#define NBG_GYRO_TYPE_UNCALIBRATED 0x02U
+#define NBG_GYRO_MAX_LEASE_MS 1500U
+
+/* Temporary SensorService gyro overlay. Deltas are IEEE-754 float bit patterns
+ * in rad/s; the lease must be refreshed by the client while the test is on. */
+typedef struct _NBG_GYRO_CONFIG {
+    uint32_t abi_version;
+    uint32_t enabled;
+    uint32_t type_mask;
+    uint32_t lease_ms;
+    uint32_t delta_x_bits;
+    uint32_t delta_y_bits;
+    uint64_t modified_events;
+    uint32_t hook_available;
+    uint32_t reserved;
+} NBG_GYRO_CONFIG, *PNBG_GYRO_CONFIG;
 
 typedef struct _INIT_KEY {
     uint32_t abi_version;

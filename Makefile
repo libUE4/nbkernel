@@ -29,7 +29,8 @@ $(MODULE_NAME)-objs := \
 	src/hwbp/hwbp_shadow.o \
 	src/hwbp/hwbp_watch.o \
 	src/input/touch.o \
-	src/input/snapshot.o
+	src/input/snapshot.o \
+	src/input/gyro.o
 
 # ---------- 编译参数 ----------
 ccflags-y += -I$(src)/include

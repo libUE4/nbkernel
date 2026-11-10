@@ -34,6 +34,7 @@
 #include "process.h"
 #include "query.h"
 #include "touch.h"
+#include "gyro.h"
 #include "hwbp_raw.h"
 #include "hwbp_capture.h"
 #include "hwbp_shadow.h"
@@ -1570,6 +1571,16 @@ static long nbg_comm_ioctl_dispatch(struct socket *sock, unsigned int cmd,
         if (copy_to_user((void __user *)arg, &req, sizeof(req)))
             return -EFAULT;
         return 0;
+    }
+    case OP_GYRO_CONFIG: {
+        NBG_GYRO_CONFIG req;
+
+        if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+            return -EFAULT;
+        ret = nbg_gyro_configure(&req);
+        if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+            return -EFAULT;
+        return ret;
     }
     case OP_HIDE_KGSL:
         return hide_kgsl_install();
