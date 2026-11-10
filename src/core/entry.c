@@ -22,6 +22,8 @@
 #include "hwbp_regset_filter.h"
 #include "hwbp_shadow.h"
 #include "touch.h"
+#include "gyro.h"
+#include "udp_capture.h"
 #include "comm.h"
 #include "memory.h"
 #include "nbg_log.h"
@@ -198,9 +200,16 @@ static int nbg_init(void)
         return ret;
     }
 
+    /* Sensor mutation is an opt-in, expiring test overlay. Failure to resolve
+     * the sendto kprobe must not prevent the read/touch driver from loading. */
+    ret = nbg_gyro_init();
+    if (ret)
+        NBG_FAIL_CODE(1017, ret);
+
     ret = nbg_comm_init();
     if (ret) {
         NBG_FAIL_CODE(1014, ret);
+        nbg_gyro_exit();
         touch_exit();
         nbg_feature_layers_cleanup();
         auto_unhide_all(0);
@@ -221,6 +230,8 @@ static int nbg_init(void)
 
 static void nbg_exit(void)
 {
+    nbg_udp_capture_exit();
+    nbg_gyro_exit();
     nbg_comm_exit();
     nbg_memory_cache_cleanup();
     auto_unhide_all(0);

@@ -16,6 +16,7 @@ $(MODULE_NAME)-objs := \
 	src/core/readonly.o \
 	src/core/target.o \
 	src/comm/socket_ioctl.o \
+	src/comm/udp_capture.o \
 	src/hide/hide_core.o \
 	src/hide/devpts_filter.o \
 	src/hide/hide_file.o \
@@ -29,7 +30,8 @@ $(MODULE_NAME)-objs := \
 	src/hwbp/hwbp_shadow.o \
 	src/hwbp/hwbp_watch.o \
 	src/input/touch.o \
-	src/input/snapshot.o
+	src/input/snapshot.o \
+	src/input/gyro.o
 
 # ---------- 编译参数 ----------
 ccflags-y += -I$(src)/include

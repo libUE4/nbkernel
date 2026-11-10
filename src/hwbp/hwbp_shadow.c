@@ -57,7 +57,6 @@
 /* ---- shadow hook 槽 ---- */
 
 #define RMCN_RANGE_PAIR_LOAD_INSN 0x2D409426U /* LDP S6,S5,[X1,#4] */
-#define RMCN_RANGE_PAIR_LOAD_RVA  0x0176B74CULL
 #define RMCN_RANGE_CACHE_SIZE     256U
 #define RMCN_RANGE_CAPSULE_KIND   2U
 #define RMCN_RANGE_BOX_KIND       3U
@@ -71,8 +70,6 @@
 #define RMCN_RANGE_EVENT_INPUT    0xD301U
 #define RMCN_RANGE_EVENT_OUTPUT   0xD302U
 #define RMCN_FREE_VIEW_EPILOGUE_INSN 0xA9434FF4U /* LDP X20,X19,[SP,#48] */
-#define RMCN_FREE_VIEW_EPILOGUE_RVA  0x08AADEACULL
-#define RMCN_FREE_VIEW_SET_OBSERVER_RVA 0x07FCF880ULL
 #define RMCN_FREE_VIEW_SET_OBSERVER_INSN 0xF81D0FFEU
 #define RMCN_FREE_VIEW_LOG_PERIOD    (2 * HZ)
 #define RMCN_FREE_VIEW_ENABLE               6U
@@ -89,7 +86,6 @@ struct rot_ctx {
     bool     active;
     pid_t    pid;
     uint64_t target_vaddr;
-    uint32_t lr_filter;
     uint32_t is_rot_hook;
     seqcount_t custom_seq;
     uint32_t custom_value[3];
@@ -111,7 +107,7 @@ struct rot_ctx {
     atomic_t trace_capture_state; /* 0=idle, 1=in-flight, 2=published */
     raw_spinlock_t range_lock;
     struct rmcn_range_geometry_entry *range_cache;
-    uint64_t module_base;
+    uint64_t observer_addr;
     atomic_t free_view_command;
     atomic64_t free_view_hook_hits;
     atomic64_t free_view_stack_failures;
@@ -130,22 +126,15 @@ struct rot_ctx {
 static struct rot_ctx rot_hooks[MAX_SHADOW_HOOKS];
 static DEFINE_MUTEX(rot_hook_mutex);
 
-#define RMCN_INSTANT_VELOCITY_INSN   0x1E21080AU /* FMUL S10,S0,S1 */
 #define NZ_FIRE_RAYCAST_ENDPOINT_INSN 0xAA1603E0U /* MOV X0,X22 */
-#define RMCN_INSTANT_VELOCITY_RVA    0x07DCBB94ULL
 #define RMCN_ROTATION_INPUT_PAIR_INSN 0x2D058A81U /* STP S1,S2,[X20,#0x2C] */
-#define RMCN_ROTATION_INPUT_PAIR_RVA  0x0833A04CULL /* current: CorrectCmdViewPitchYaw STP S1,S2,[X20,#0x2C] */
 #define RMCN_CROSSHAIR_INPUT_PAIR_INSN 0x2D458281U /* LDP S1,S0,[X20,#0x2C] */
-#define RMCN_CROSSHAIR_INPUT_PAIR_RVA  0x08AA8670ULL /* CameraThirdState.CorrectShootPitchYaw */
 /* Common first/third-person shoot-angle return, verified in live memory.
  * LDP X20,X19,[SP,#0x20] changes only GPRs; returned angles are S0/S1. */
 #define RMCN_CAMERA_SHOOT_RETURN_INSN 0xA9424FF4U
-#define RMCN_CAMERA_SHOOT_RETURN_RVA  0x08AA0544ULL
 #define RMCN_USERCMD_SEQUENCE_OFFSET       0x10ULL
 #define RMCN_SPREAD_CONTEXT_INSN 0x1E204142U /* FMOV S2,S10 */
-#define RMCN_SPREAD_CONTEXT_RVA  0x083BE3F4ULL
 #define RMCN_TPP_SHOOT_INPUT_INSN 0x1E204008U /* FMOV S8,S0 */
-#define RMCN_TPP_SHOOT_INPUT_RVA  0x083BE224ULL
 /* Q30 radians per degree, shared by the active spread compensation path. */
 #define RMCN_Q30_DEG2RAD          18740330LL
 /* case40 normally receives a weapon pointer in c0/c1 to maintain the spread
@@ -159,7 +148,6 @@ static DEFINE_MUTEX(rot_hook_mutex);
 #define RMCN_WEAPON_TOTAL_SPREAD_OFFSET 0x80ULL
 #define RMCN_WEAPON_IS_ADS_OFFSET       0x158ULL
 #define RMCN_SPREAD_MAX_TIMES 32
-#define NZ_FIRE_RAYCAST_ENDPOINT_RVA  0x1145A2A4ULL
 #define NZ_CASE8_EVENT_HIT            0x8001U
 #define NZ_CASE8_EVENT_SUCCESS        0x8002U
 #define NZ_CASE8_EVENT_FALLBACK       0x8003U
@@ -198,18 +186,11 @@ static DEFINE_MUTEX(rot_hook_mutex);
 #define DFM_SCALAR_HOOK_EVENT          0xD5A5U
 #define DFM_SCALAR_HOOK_FPSTATE_FLAG   0x80000000U
 #define DFM_OUTLINE_MATERIAL_LOAD_INSN   0xF9439288U /* LDR X8,[X20,#0x720] */
-#define DFM_OUTLINE_MATERIAL_LOAD_RVA    0x1080A9F8ULL
-/* 同一段渲染快照代码里紧随材质之后的标志字节读取：
- *   0x1080AA00  LDRB W8,[X20,#0x728]  → 第一处（命中即抬高 bit0）
- *   0x1080AA0C  LDRB W8,[X20,#0x728]  → 第二处
- * 断点命中时只改 X8，不写目标内存。 */
+/* 渲染快照路径的标志字节读取；断点命中时只改 X8，不写目标内存。 */
 #define DFM_OUTLINE_FLAGS_LOAD_INSN       0x395CA288U /* LDRB W8,[X20,#0x728] */
-#define DFM_OUTLINE_FLAGS_DRAW_RVA        0x1080AA00ULL
-#define DFM_OUTLINE_FLAGS_DEPTH_RVA      0x1080AA18ULL /* 第三处 LDRB W8,[X20,#0x728]，实测；当前未使用 */
 #define DFM_EFFECT_PASS_DRAW_BIT         0x01U
 #define DFM_EFFECT_PASS_DEPTH_BIT        0x04U
 #define DFM_BULLET_TRACK_INSN             0xA9BA6FFCU /* STP X28,X27,[SP,#-0x60]! */
-#define DFM_BULLET_TRACK_RVA              0x0B85AFBCULL
 #define DFM_COMPONENT_OWNER_OFFSET       0x0E8ULL
 #define DFM_CHARACTER_NET_UPDATE_OFFSET  0x150ULL
 #define DFM_CHARACTER_MAIN_MESH_OFFSET   0x3D0ULL
@@ -2282,8 +2263,7 @@ static void rot_hook_callback(struct pt_regs *regs, void *priv)
             regs->regs[2] = 0;
             regs->regs[3] = 0;
             regs->regs[30] = ctx->target_vaddr + 4;
-            regs->pc = ctx->module_base +
-                       RMCN_FREE_VIEW_SET_OBSERVER_RVA - 4;
+            regs->pc = ctx->observer_addr - 4;
         }
         break;
     }
@@ -2843,9 +2823,8 @@ static void rot_hook_callback(struct pt_regs *regs, void *priv)
         break;
     }
     case 8: {
-        /* UInstantHitFireRaycastSubComponent::FireRaycast：
-         *   0x1145A2A4 MOV X0,X22   <- 本 hook，必须仿真
-         * X23 指向本次射线终点，custom_value[0..2] 是目标世界 XYZ。 */
+        /* UInstantHitFireRaycastSubComponent::FireRaycast:
+         * X23 points to the current endpoint; custom_value[0..2] are target XYZ. */
 
         nz_case8_push_event(ctx, regs, NZ_CASE8_EVENT_HIT, &nz_case8_hits);
 
@@ -3424,74 +3403,54 @@ static pid_t shadow_normalize_tgid(pid_t pid, struct task_struct **task_out)
     return tgid;
 }
 
-static bool shadow_rva_matches(uint64_t base, uint64_t target, uint64_t rva)
-{
-    return base >= RMCN_USER_MIN_ADDR && target > base &&
-           target - base == rva;
-}
-
 static bool shadow_exact_hook_spec(uint32_t hook_type,
-                                   uint32_t *expected_insn,
-                                   uint64_t *expected_rva)
+                                   uint32_t *expected_insn)
 {
-    if (!expected_insn || !expected_rva)
+    if (!expected_insn)
         return false;
 
     switch (hook_type) {
     case 8:
         *expected_insn = NZ_FIRE_RAYCAST_ENDPOINT_INSN;
-        *expected_rva = NZ_FIRE_RAYCAST_ENDPOINT_RVA;
         return true;
     case 24:
         *expected_insn = DFM_SLOT_TRACE_NOP_INSN;
-        *expected_rva = 0;
         return true;
     case 25:
         *expected_insn = DFM_FORMULA_TRACE_INSN;
-        *expected_rva = 0;
         return true;
     case NBG_SHADOW_RMCN_ROTATION_INPUT_TYPE:
         *expected_insn = RMCN_ROTATION_INPUT_PAIR_INSN;
-        *expected_rva = RMCN_ROTATION_INPUT_PAIR_RVA;
         return true;
     case NBG_SHADOW_RMCN_CROSSHAIR_INPUT_TYPE:
         *expected_insn = RMCN_CROSSHAIR_INPUT_PAIR_INSN;
-        *expected_rva = RMCN_CROSSHAIR_INPUT_PAIR_RVA;
         return true;
     case NBG_SHADOW_RMCN_NO_SPREAD_TYPE:
         *expected_insn = RMCN_SPREAD_CONTEXT_INSN;
-        *expected_rva = RMCN_SPREAD_CONTEXT_RVA;
         return true;
     case NBG_SHADOW_RMCN_TPP_SHOOT_INPUT_TYPE:
         *expected_insn = RMCN_TPP_SHOOT_INPUT_INSN;
-        *expected_rva = RMCN_TPP_SHOOT_INPUT_RVA;
         return true;
     case 28:
     case NBG_SHADOW_DYNAMIC_HOOK_TYPE:
         /* The current-season ring selector changes register allocation per
          * build. Validation is performed by dfm_index_trace_insn_valid(). */
         *expected_insn = 0;
-        *expected_rva = 0;
         return false;
     case NBG_SHADOW_FP_LDP_SCALE_HOOK_TYPE:
         *expected_insn = RMCN_RANGE_PAIR_LOAD_INSN;
-        *expected_rva = RMCN_RANGE_PAIR_LOAD_RVA;
         return true;
     case NBG_SHADOW_DFM_OUTLINE_RENDER_TYPE:
         *expected_insn = DFM_OUTLINE_MATERIAL_LOAD_INSN;
-        *expected_rva = DFM_OUTLINE_MATERIAL_LOAD_RVA;
         return true;
     case NBG_SHADOW_DFM_OUTLINE_FLAGS_TYPE:
         *expected_insn = DFM_OUTLINE_FLAGS_LOAD_INSN;
-        *expected_rva = DFM_OUTLINE_FLAGS_DRAW_RVA;
         return true;
     case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
         *expected_insn = DFM_BULLET_TRACK_INSN;
-        *expected_rva = DFM_BULLET_TRACK_RVA;
         return true;
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
         *expected_insn = RMCN_FREE_VIEW_EPILOGUE_INSN;
-        *expected_rva = RMCN_FREE_VIEW_EPILOGUE_RVA;
         return true;
     default:
         return false;
@@ -3533,7 +3492,8 @@ static bool shadow_ctx_can_emulate(const struct rot_ctx *ctx, uint32_t hook_type
     case NBG_SHADOW_DFM_BULLET_TRACK_TYPE:
         return true;
     case NBG_SHADOW_RMCN_FREE_VIEW_TYPE:
-        return ctx->module_base >= RMCN_USER_MIN_ADDR;
+        return ctx->observer_addr >= RMCN_USER_MIN_ADDR &&
+               !(ctx->observer_addr & 0x3);
     default:
         return true;
     }
@@ -3550,7 +3510,6 @@ int shadow_add_hook(struct shadow_req *req)
     uint32_t requested_type;
     uint32_t hook_type;
     uint32_t expected_insn = 0;
-    uint64_t expected_rva = 0;
     pid_t hook_pid;
     bool read_ok;
     bool exact_validate;
@@ -3578,7 +3537,7 @@ int shadow_add_hook(struct shadow_req *req)
         return -ESRCH;
     }
 
-    /* 统一提前读取原指令；XOM 读 0 时走 base+RVA 校验。 */
+    /* Read the target instruction before installing a shadow callback. */
     read_ok = read_process_memory_kernel(hook_pid, req->target_vaddr,
                                          &original_insn,
                                          sizeof(original_insn));
@@ -3592,24 +3551,13 @@ int shadow_add_hook(struct shadow_req *req)
         return -EOPNOTSUPP;
     }
 
-    /* 用内核读取 XOM 代码页并核对被仿真的原指令。版本偏移漂移时
-     * 必须拒绝安装，不能跳过一条未知指令后再强写寄存器。 */
-    exact_validate = shadow_exact_hook_spec(hook_type, &expected_insn,
-                                            &expected_rva);
+    /* Validate callback instructions without binding them to a build offset.
+     * The camera-return variant shares type 35 and is identified by opcode. */
+    exact_validate = shadow_exact_hook_spec(hook_type, &expected_insn);
     if (hook_type == NBG_SHADOW_RMCN_ROTATION_INPUT_TYPE &&
-        shadow_rva_matches(req->vaddr, req->target_vaddr,
-                           RMCN_CAMERA_SHOOT_RETURN_RVA)) {
+        read_ok && original_insn == RMCN_CAMERA_SHOOT_RETURN_INSN) {
         case35_camera_return = true;
         expected_insn = RMCN_CAMERA_SHOOT_RETURN_INSN;
-        expected_rva = RMCN_CAMERA_SHOOT_RETURN_RVA;
-        exact_validate = true;
-    }
-    if (!exact_validate && hook_type == 5U &&
-        req->vaddr >= RMCN_USER_MIN_ADDR &&
-        req->target_vaddr > req->vaddr &&
-        req->target_vaddr - req->vaddr == RMCN_INSTANT_VELOCITY_RVA) {
-        expected_insn = RMCN_INSTANT_VELOCITY_INSN;
-        expected_rva = RMCN_INSTANT_VELOCITY_RVA;
         exact_validate = true;
     }
     if ((hook_type == 28U || hook_type == NBG_SHADOW_DYNAMIC_HOOK_TYPE) &&
@@ -3622,13 +3570,7 @@ int shadow_add_hook(struct shadow_req *req)
         return -EINVAL;
     }
     if (exact_validate) {
-        const bool xom_zero = read_ok && original_insn == 0;
-        const bool base_rva_ok = shadow_rva_matches(req->vaddr,
-                                                    req->target_vaddr,
-                                                    expected_rva);
-        if ((read_ok && original_insn != expected_insn && !xom_zero) ||
-            (read_ok && xom_zero && !base_rva_ok) ||
-            (!read_ok && !base_rva_ok)) {
+        if (!read_ok || original_insn != expected_insn) {
             put_task_struct(task);
             NBG_INFO("shadow opcode reject type=%u req=%u pid=%d addr=0x%llx insn=%08x\n",
                      hook_type, requested_type, hook_pid,
@@ -3636,26 +3578,19 @@ int shadow_add_hook(struct shadow_req *req)
             NBG_FAIL_CODE(2206, -EINVAL);
             return -EINVAL;
         }
-        if (xom_zero || !read_ok)
-            NBG_INFO("shadow rva validated type=%u pid=%d base=0x%llx rva=0x%llx read_ok=%d\n",
-                     hook_type, hook_pid,
-                     (unsigned long long)req->vaddr,
-                     (unsigned long long)expected_rva, read_ok ? 1 : 0);
     }
     if (hook_type == NBG_SHADOW_RMCN_FREE_VIEW_TYPE) {
         uint32_t observer_insn = 0;
 
-        /* Do not redirect a camera callback into an unrelated method if
-         * only the LDP at the hook location survived a game update. */
-        if (!shadow_rva_matches(req->vaddr, req->target_vaddr,
-                                RMCN_FREE_VIEW_EPILOGUE_RVA) ||
-            !read_process_memory_kernel(
-                hook_pid,
-                req->vaddr + RMCN_FREE_VIEW_SET_OBSERVER_RVA,
-                &observer_insn, sizeof(observer_insn)) ||
+        /* User space resolves the method address; verify the actual landing
+         * instruction before allowing the callback to branch there. */
+        if (req->vaddr < 4 || (req->vaddr & 0x3) ||
+            !read_process_memory_kernel(hook_pid, req->vaddr,
+                                        &observer_insn,
+                                        sizeof(observer_insn)) ||
             observer_insn != RMCN_FREE_VIEW_SET_OBSERVER_INSN) {
             put_task_struct(task);
-            NBG_INFO("rmcn free view observer opcode reject pid=%d base=0x%llx insn=%08x\n",
+            NBG_INFO("rmcn free view observer opcode reject pid=%d addr=0x%llx insn=%08x\n",
                      hook_pid, (unsigned long long)req->vaddr,
                      observer_insn);
             NBG_FAIL_CODE(2206, -EINVAL);
@@ -3693,9 +3628,8 @@ int shadow_add_hook(struct shadow_req *req)
             atomic_set(&rot_hooks[i].trace_capture_state, 0);
         if (hook_type == NBG_SHADOW_RMCN_ROTATION_INPUT_TYPE)
             atomic_set(&rot_hooks[i].rotation_input_last_token, -1);
-        WRITE_ONCE(rot_hooks[i].lr_filter,
-                   (req->vaddr == (req->target_vaddr & ~0xFFFULL)) ?
-                   0 : (uint32_t)req->vaddr);
+        if (hook_type == NBG_SHADOW_RMCN_FREE_VIEW_TYPE)
+            WRITE_ONCE(rot_hooks[i].observer_addr, req->vaddr);
         preempt_disable();
         write_seqcount_begin(&rot_hooks[i].custom_seq);
         WRITE_ONCE(rot_hooks[i].custom_value[0], req->custom_rot[0]);
@@ -3744,14 +3678,11 @@ int shadow_add_hook(struct shadow_req *req)
     raw_spin_lock_init(&ctx->range_lock);
     ctx->pid             = hook_pid;
     ctx->target_vaddr    = req->target_vaddr;
-    ctx->lr_filter       = (req->vaddr == (req->target_vaddr & ~0xFFFULL)) ?
-                           0 : (uint32_t)req->vaddr;
     ctx->is_rot_hook     = hook_type;
     ctx->case35_camera_return = case35_camera_return;
     ctx->trace_insn      = original_insn;
     if (hook_type == NBG_SHADOW_RMCN_FREE_VIEW_TYPE)
-        ctx->module_base = req->target_vaddr -
-                           RMCN_FREE_VIEW_EPILOGUE_RVA;
+        ctx->observer_addr = req->vaddr;
     ctx->trace_tid       = (hook_type == NBG_SHADOW_DYNAMIC_HOOK_TYPE &&
                             req->vaddr > 0 &&
                             req->vaddr <= 0x7fffffffULL) ?

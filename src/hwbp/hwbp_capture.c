@@ -18,6 +18,10 @@
 
 #define HWBP_CAPTURE_DEFAULT_TIMEOUT_MS 300U
 #define HWBP_CAPTURE_MAX_TIMEOUT_MS     1000U
+#ifdef NBG_DEBUG
+#define HWBP_KDF_CAPTURE_MAX_TIMEOUT_MS 120000U
+#define HWBP_KDF_SRV_STACK_OFFSET       0x130U
+#endif
 
 struct hwbp_capture_context {
     struct mutex lock;
@@ -38,6 +42,9 @@ struct hwbp_capture_context {
     uint64_t registers[31];
     uint64_t sp;
     uint64_t pstate;
+#ifdef NBG_DEBUG
+    bool capture_kdf;
+#endif
     bool capture_pointees;
     uint32_t match_enabled;
     uint32_t match_register;
@@ -131,6 +138,9 @@ static void hwbp_capture_pointees(struct pt_regs *regs)
  * advance lands at the exact BR X8 destination, including unmatched hits. */
 static void hwbp_capture_callback(struct pt_regs *regs, void *private)
 {
+#ifdef NBG_DEBUG
+    const bool capture_kdf = READ_ONCE(capture.capture_kdf);
+#endif
     const uint64_t branch_target = regs->regs[8];
 
     (void)private;
@@ -153,11 +163,27 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
         capture.hit_tid = current->pid;
         capture.hits = 1;
         capture.flags = NBG_HWBP_CAPTURE_FLAG_BRANCH_EMULATED;
+#ifdef NBG_DEBUG
+        if (capture_kdf) {
+            capture.pointee_address[0] =
+                untagged_addr(regs->sp + HWBP_KDF_SRV_STACK_OFFSET);
+            if (hwbp_capture_read_user_words(
+                    capture.pointee_address[0], capture.pointee_data[0], 32U))
+                capture.pointee_valid_mask |= 1U;
+            capture.flags = NBG_HWBP_CAPTURE_FLAG_KDF_EOR_EMULATED;
+        } else
+#endif
         if (capture.capture_pointees)
             hwbp_capture_pointees(regs);
         smp_store_release(&capture.state.counter, NBG_HWBP_CAPTURE_HIT);
         schedule_work(&capture.retire_work);
     }
+#ifdef NBG_DEBUG
+    if (capture_kdf) {
+        regs->regs[12] = regs->regs[9] ^ regs->regs[25];
+        return;
+    }
+#endif
     regs->pc = branch_target - 4U;
 }
 
@@ -201,7 +227,13 @@ static void hwbp_capture_fill(HwbpCaptureReq *request)
     request->pid = capture.tgid;
     request->tid = capture.tid;
     request->target_vaddr = capture.target;
+#ifdef NBG_DEBUG
+    request->expected_instruction = capture.capture_kdf
+                                        ? NBG_HWBP_CAPTURE_KDF_EOR
+                                        : NBG_HWBP_CAPTURE_BR_X8;
+#else
     request->expected_instruction = NBG_HWBP_CAPTURE_BR_X8;
+#endif
     request->state = state;
     request->result = capture.result;
     request->hit_count = 0;
@@ -258,6 +290,9 @@ static void hwbp_capture_reset_locked(void)
     memset(capture.registers, 0, sizeof(capture.registers));
     capture.sp = 0;
     capture.pstate = 0;
+#ifdef NBG_DEBUG
+    capture.capture_kdf = false;
+#endif
     capture.capture_pointees = false;
     capture.match_enabled = 0;
     capture.match_register = 0;
@@ -276,12 +311,20 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     uint32_t instruction = 0;
     pid_t tgid;
     uint32_t timeout;
+#ifdef NBG_DEBUG
+    bool capture_kdf = request->action == NBG_HWBP_CAPTURE_ARM_KDF;
+    uint32_t expected_instruction = capture_kdf
+                                       ? NBG_HWBP_CAPTURE_KDF_EOR
+                                       : NBG_HWBP_CAPTURE_BR_X8;
+#else
+    uint32_t expected_instruction = NBG_HWBP_CAPTURE_BR_X8;
+#endif
     int ret;
 
     if (!request->pid || request->tid < 0 ||
         request->target_vaddr < 0x10000U ||
         (request->target_vaddr & 3U) ||
-        request->expected_instruction != NBG_HWBP_CAPTURE_BR_X8)
+        request->expected_instruction != expected_instruction)
         return -EINVAL;
     if (request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION &&
         (request->match_enabled > 1U ||
@@ -290,6 +333,12 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
         return -EINVAL;
     timeout = request->timeout_ms ? request->timeout_ms :
         HWBP_CAPTURE_DEFAULT_TIMEOUT_MS;
+#ifdef NBG_DEBUG
+    if (capture_kdf) {
+        if (timeout > HWBP_KDF_CAPTURE_MAX_TIMEOUT_MS)
+            return -EINVAL;
+    } else
+#endif
     if (timeout > HWBP_CAPTURE_MAX_TIMEOUT_MS)
         return -EINVAL;
     tgid = hwbp_capture_normalize_tgid(request->pid);
@@ -298,7 +347,7 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
         return -ESRCH;
     if (!read_process_memory_kernel(tgid, request->target_vaddr,
                                     &instruction, sizeof(instruction)) ||
-        instruction != NBG_HWBP_CAPTURE_BR_X8)
+        instruction != expected_instruction)
         return -EINVAL;
 
     mutex_lock(&capture.lock);
@@ -322,6 +371,9 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     capture.tid = request->tid;
     capture.target = request->target_vaddr;
     capture.capture_pointees = request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION;
+#ifdef NBG_DEBUG
+    capture.capture_kdf = capture_kdf;
+#endif
     if (capture.capture_pointees && request->match_enabled) {
         capture.match_enabled = 1;
         capture.match_register = request->match_register;
@@ -387,6 +439,11 @@ int hwbp_capture_control(HwbpCaptureReq *request)
     case NBG_HWBP_CAPTURE_ARM:
         ret = hwbp_capture_arm(request);
         break;
+#ifdef NBG_DEBUG
+    case NBG_HWBP_CAPTURE_ARM_KDF:
+        ret = hwbp_capture_arm(request);
+        break;
+#endif
     case NBG_HWBP_CAPTURE_READ:
         mutex_lock(&capture.lock);
         hwbp_capture_fill(request);
