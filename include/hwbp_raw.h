@@ -20,7 +20,13 @@ struct raw_bp_req {
 int  raw_hwbp_add(struct raw_bp_req *req);
 /* Refuse an existing (pid,address) owner instead of replacing its callback. */
 int  raw_hwbp_add_exclusive(struct raw_bp_req *req);
+/* Atomically reserve and publish two exclusive breakpoints for one target. */
+int  raw_hwbp_add_pair_exclusive(struct raw_bp_req *first,
+                                 struct raw_bp_req *second);
 int  raw_hwbp_del_pid(pid_t pid, uint64_t target_vaddr);
+/* Remove both addresses under one lifecycle/table transaction. */
+int  raw_hwbp_del_pair_pid(pid_t pid, uint64_t first_vaddr,
+                           uint64_t second_vaddr);
 int  raw_hwbp_del(uint64_t target_vaddr);
 void raw_hwbp_clear_all(void);
 bool raw_hwbp_has_pid(pid_t pid);

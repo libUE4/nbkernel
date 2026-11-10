@@ -10,7 +10,13 @@
 #include <sys/types.h>
 #endif
 
+#if defined(__has_include)
+#if __has_include("secret.h")
 #include "secret.h"
+#endif
+#else
+#include "secret.h"
+#endif
 #include "NbgUdpCaptureAbi.h"
 
 #define NBG_ABI_VERSION      1U
@@ -522,8 +528,10 @@ typedef struct _HwbpCaps {
  * pre-branch register state for the offline segment emulator. */
 #define NBG_HWBP_CAPTURE_ABI_VERSION_1 1U
 #define NBG_HWBP_CAPTURE_ABI_VERSION 2U
+#define NBG_HWBP_CAPTURE_ABI_VERSION_3 3U
 #define NBG_HWBP_CAPTURE_V1_SIZE     344U
 #define NBG_HWBP_CAPTURE_V2_SIZE     600U
+#define NBG_HWBP_CAPTURE_V3_SIZE     752U
 #define NBG_HWBP_CAPTURE_POINTEE_COUNT 4U
 #define NBG_HWBP_CAPTURE_POINTEE_SIZE 32U
 #define NBG_HWBP_CAPTURE_STACK_SIZE  64U
@@ -543,6 +551,9 @@ typedef struct _HwbpCaps {
 #define NBG_HWBP_CAPTURE_ARM_KDF      4U
 #define NBG_HWBP_CAPTURE_KDF_EOR      0xCA19012CU
 #define NBG_HWBP_CAPTURE_FLAG_KDF_EOR_EMULATED (1U << 1)
+#define NBG_HWBP_CAPTURE_ARM_KDF_DUAL 6U
+#define NBG_HWBP_CAPTURE_KDF_PUBLISH 0xF942A6D3U
+#define NBG_HWBP_CAPTURE_FLAG_KDF_PUBLISH (1U << 2)
 #endif
 
 typedef struct _HwbpCaptureReq {
@@ -577,6 +588,21 @@ typedef struct _HwbpCaptureReq {
     uint8_t pointee_data[NBG_HWBP_CAPTURE_POINTEE_COUNT][NBG_HWBP_CAPTURE_POINTEE_SIZE];
     uint64_t stack_address;
     uint8_t stack_data[NBG_HWBP_CAPTURE_STACK_SIZE];
+    /* v3 diagnostic capture: KDF inputs plus the published 2-slot key ring. */
+    uint64_t secondary_target;
+    uint64_t entry_owner;
+    int32_t entry_tid;
+    uint32_t entry_valid;
+    uint32_t entry_flags;
+    uint32_t reserved_v3;
+    uint64_t kdf_registers[4]; /* X9, X10, X19, X25 from EOR */
+    uint8_t kdf_srv32[32];
+    uint32_t kdf_srv_valid;
+    uint32_t session_valid;
+    uint64_t session_object;
+    uint32_t session_key_size;
+    uint32_t session_active_slot;
+    uint8_t session_slots[2][16];
 } HwbpCaptureReq, *PHwbpCaptureReq;
 
 typedef struct _IntValue {

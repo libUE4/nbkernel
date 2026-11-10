@@ -44,12 +44,26 @@ struct hwbp_capture_context {
     uint64_t pstate;
 #ifdef NBG_DEBUG
     bool capture_kdf;
+    bool capture_dual;
+    uint64_t secondary_target;
+    pid_t entry_tid;
+    atomic_t entry_claim;
+    uint32_t entry_flags;
+    uint64_t kdf_registers[4];
+    uint8_t kdf_srv32[32];
+    bool kdf_srv_valid;
+    uint64_t session_object;
+    uint32_t session_key_size;
+    uint32_t session_active_slot;
+    bool session_valid;
+    uint8_t session_slots[2][16];
 #endif
     bool capture_pointees;
     uint32_t match_enabled;
     uint32_t match_register;
     uint64_t match_value;
     uint32_t pointee_valid_mask;
+    uint64_t entry_owner;
     uint64_t pointee_address[NBG_HWBP_CAPTURE_POINTEE_COUNT];
     uint8_t pointee_data[NBG_HWBP_CAPTURE_POINTEE_COUNT][NBG_HWBP_CAPTURE_POINTEE_SIZE];
     uint64_t stack_address;
@@ -140,10 +154,83 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
 {
 #ifdef NBG_DEBUG
     const bool capture_kdf = READ_ONCE(capture.capture_kdf);
+    const bool capture_dual = READ_ONCE(capture.capture_dual);
 #endif
     const uint64_t branch_target = regs->regs[8];
 
     (void)private;
+#ifdef NBG_DEBUG
+    if (capture_dual && regs->pc == READ_ONCE(capture.target)) {
+        if (READ_ONCE(capture.active) && current &&
+            current->tgid == READ_ONCE(capture.tgid) &&
+            (!READ_ONCE(capture.tid) ||
+             current->pid == READ_ONCE(capture.tid)) &&
+            (!READ_ONCE(capture.match_enabled) ||
+             regs->regs[READ_ONCE(capture.match_register)] ==
+                 READ_ONCE(capture.match_value))) {
+            if (atomic_cmpxchg(&capture.entry_claim, 0, 1) == 0) {
+                uint64_t srv_address = untagged_addr(
+                    regs->sp + HWBP_KDF_SRV_STACK_OFFSET);
+                capture.entry_owner = regs->regs[22];
+                capture.entry_tid = current->pid;
+                capture.entry_flags = NBG_HWBP_CAPTURE_FLAG_KDF_EOR_EMULATED;
+                capture.kdf_registers[0] = regs->regs[9];
+                capture.kdf_registers[1] = regs->regs[10];
+                capture.kdf_registers[2] = regs->regs[19];
+                capture.kdf_registers[3] = regs->regs[25];
+                capture.kdf_srv_valid = hwbp_capture_read_user_words(
+                    srv_address, capture.kdf_srv32, sizeof(capture.kdf_srv32));
+                smp_store_release(&capture.entry_claim.counter, 2);
+            }
+        }
+        regs->regs[12] = regs->regs[9] ^ regs->regs[25];
+        return;
+    }
+    if (capture_dual && regs->pc == READ_ONCE(capture.secondary_target)) {
+        if (READ_ONCE(capture.active) && current &&
+            current->tgid == READ_ONCE(capture.tgid) &&
+            (!READ_ONCE(capture.tid) ||
+             current->pid == READ_ONCE(capture.tid)) &&
+            smp_load_acquire(&capture.entry_claim.counter) == 2 &&
+            current->pid == READ_ONCE(capture.entry_tid) &&
+            regs->regs[22] == READ_ONCE(capture.entry_owner) &&
+            atomic_cmpxchg(&capture.state, NBG_HWBP_CAPTURE_ARMED,
+                           NBG_HWBP_CAPTURE_CAPTURING) ==
+                NBG_HWBP_CAPTURE_ARMED) {
+            uint8_t session[0x50] = { 0 };
+            uint64_t object = untagged_addr(regs->regs[24]);
+
+            memcpy(capture.registers, regs->regs, sizeof(capture.registers));
+            capture.sp = regs->sp;
+            capture.pstate = regs->pstate;
+            capture.hit_pc = regs->pc;
+            capture.hit_time_ns = ktime_get_ns();
+            capture.hit_tid = current->pid;
+            capture.hits = 1;
+            capture.flags = NBG_HWBP_CAPTURE_FLAG_KDF_PUBLISH;
+            capture.session_object = object;
+            capture.session_valid = hwbp_capture_read_user_words(
+                object, session, sizeof(session));
+            if (capture.session_valid) {
+                memcpy(&capture.session_key_size, session + 0x38,
+                       sizeof(capture.session_key_size));
+                memcpy(&capture.session_active_slot, session + 0x3c,
+                       sizeof(capture.session_active_slot));
+                memcpy(capture.session_slots[0], session + 0x10, 16);
+                memcpy(capture.session_slots[1], session + 0x20, 16);
+                if (capture.session_active_slot > 1U ||
+                    capture.session_key_size != 16U)
+                    capture.session_valid = false;
+            }
+            smp_store_release(&capture.state.counter, NBG_HWBP_CAPTURE_HIT);
+            schedule_work(&capture.retire_work);
+        }
+        /* The trapped instruction is ldr x19,[x22,#0x548]; X24 already holds
+         * that exact pointer from the immediately preceding load. */
+        regs->regs[19] = regs->regs[24];
+        return;
+    }
+#endif
     if (READ_ONCE(capture.active) && current &&
         current->tgid == READ_ONCE(capture.tgid) &&
         (!READ_ONCE(capture.tid) ||
@@ -151,6 +238,12 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
         (!READ_ONCE(capture.match_enabled) ||
          regs->regs[READ_ONCE(capture.match_register)] ==
              READ_ONCE(capture.match_value)) &&
+#ifdef NBG_DEBUG
+        (!capture_dual ||
+         (smp_load_acquire(&capture.entry_claim.counter) == 2 &&
+          current->pid == READ_ONCE(capture.entry_tid) &&
+          regs->regs[22] == READ_ONCE(capture.entry_owner))) &&
+#endif
         atomic_cmpxchg(&capture.state, NBG_HWBP_CAPTURE_ARMED,
                        NBG_HWBP_CAPTURE_CAPTURING) ==
             NBG_HWBP_CAPTURE_ARMED) {
@@ -164,7 +257,7 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
         capture.hits = 1;
         capture.flags = NBG_HWBP_CAPTURE_FLAG_BRANCH_EMULATED;
 #ifdef NBG_DEBUG
-        if (capture_kdf) {
+        if (capture_kdf && !capture_dual) {
             capture.pointee_address[0] =
                 untagged_addr(regs->sp + HWBP_KDF_SRV_STACK_OFFSET);
             if (hwbp_capture_read_user_words(
@@ -179,7 +272,7 @@ static void hwbp_capture_callback(struct pt_regs *regs, void *private)
         schedule_work(&capture.retire_work);
     }
 #ifdef NBG_DEBUG
-    if (capture_kdf) {
+    if (capture_kdf && !capture_dual) {
         regs->regs[12] = regs->regs[9] ^ regs->regs[25];
         return;
     }
@@ -201,7 +294,15 @@ static void hwbp_capture_retire(struct work_struct *work)
     }
     tgid = capture.tgid;
     target = capture.target;
-    ret = raw_hwbp_del_pid(tgid, target);
+#ifdef NBG_DEBUG
+    if (capture.capture_dual)
+        ret = raw_hwbp_del_pair_pid(tgid, target,
+                                    capture.secondary_target);
+    else
+#endif
+        ret = raw_hwbp_del_pid(tgid, target);
+    if (ret == -ENOENT)
+        ret = 0;
     if (ret && ret != -ENOENT) {
         capture.result = ret;
     } else {
@@ -228,9 +329,10 @@ static void hwbp_capture_fill(HwbpCaptureReq *request)
     request->tid = capture.tid;
     request->target_vaddr = capture.target;
 #ifdef NBG_DEBUG
-    request->expected_instruction = capture.capture_kdf
-                                        ? NBG_HWBP_CAPTURE_KDF_EOR
-                                        : NBG_HWBP_CAPTURE_BR_X8;
+    request->expected_instruction = capture.capture_dual
+        ? NBG_HWBP_CAPTURE_KDF_EOR
+        : (capture.capture_kdf ? NBG_HWBP_CAPTURE_KDF_EOR
+                               : NBG_HWBP_CAPTURE_BR_X8);
 #else
     request->expected_instruction = NBG_HWBP_CAPTURE_BR_X8;
 #endif
@@ -254,6 +356,45 @@ static void hwbp_capture_fill(HwbpCaptureReq *request)
     memset(request->pointee_data, 0, sizeof(request->pointee_data));
     request->stack_address = 0;
     memset(request->stack_data, 0, sizeof(request->stack_data));
+    if (request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION_3) {
+        request->secondary_target = 0;
+        request->entry_owner = 0;
+        request->entry_tid = 0;
+        request->entry_valid = 0;
+        request->entry_flags = 0;
+        request->reserved_v3 = 0;
+        memset(request->kdf_registers, 0, sizeof(request->kdf_registers));
+        memset(request->kdf_srv32, 0, sizeof(request->kdf_srv32));
+        request->kdf_srv_valid = 0;
+        request->session_object = 0;
+        request->session_key_size = 0;
+        request->session_active_slot = 0;
+        request->session_valid = 0;
+        memset(request->session_slots, 0, sizeof(request->session_slots));
+    }
+#ifdef NBG_DEBUG
+    if (request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION_3) {
+        request->secondary_target = capture.secondary_target;
+        if (capture.capture_dual &&
+            smp_load_acquire(&capture.entry_claim.counter) == 2) {
+            request->entry_owner = READ_ONCE(capture.entry_owner);
+            request->entry_tid = READ_ONCE(capture.entry_tid);
+            request->entry_valid = 1;
+            request->entry_flags = READ_ONCE(capture.entry_flags);
+            memcpy(request->kdf_registers, capture.kdf_registers,
+                   sizeof(request->kdf_registers));
+            memcpy(request->kdf_srv32, capture.kdf_srv32,
+                   sizeof(request->kdf_srv32));
+            request->kdf_srv_valid = capture.kdf_srv_valid ? 1U : 0U;
+        }
+        request->session_object = capture.session_object;
+        request->session_key_size = capture.session_key_size;
+        request->session_active_slot = capture.session_active_slot;
+        request->session_valid = capture.session_valid ? 1U : 0U;
+        memcpy(request->session_slots, capture.session_slots,
+               sizeof(request->session_slots));
+    }
+#endif
     if (state == NBG_HWBP_CAPTURE_HIT) {
         request->hit_count = capture.hits;
         request->hit_tid = capture.hit_tid;
@@ -292,7 +433,21 @@ static void hwbp_capture_reset_locked(void)
     capture.pstate = 0;
 #ifdef NBG_DEBUG
     capture.capture_kdf = false;
+    capture.capture_dual = false;
+    capture.secondary_target = 0;
+    capture.entry_tid = 0;
+    capture.entry_flags = 0;
+    atomic_set(&capture.entry_claim, 0);
+    memset(capture.kdf_registers, 0, sizeof(capture.kdf_registers));
+    memset(capture.kdf_srv32, 0, sizeof(capture.kdf_srv32));
+    capture.kdf_srv_valid = false;
+    capture.session_object = 0;
+    capture.session_key_size = 0;
+    capture.session_active_slot = 0;
+    capture.session_valid = false;
+    memset(capture.session_slots, 0, sizeof(capture.session_slots));
 #endif
+    capture.entry_owner = 0;
     capture.capture_pointees = false;
     capture.match_enabled = 0;
     capture.match_register = 0;
@@ -309,13 +464,19 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
 {
     struct raw_bp_req raw = { 0 };
     uint32_t instruction = 0;
+#ifdef NBG_DEBUG
+    uint32_t secondary_instruction = 0;
+    uint64_t secondary_target = request->secondary_target;
+#endif
     pid_t tgid;
     uint32_t timeout;
 #ifdef NBG_DEBUG
     bool capture_kdf = request->action == NBG_HWBP_CAPTURE_ARM_KDF;
-    uint32_t expected_instruction = capture_kdf
-                                       ? NBG_HWBP_CAPTURE_KDF_EOR
-                                       : NBG_HWBP_CAPTURE_BR_X8;
+    bool capture_dual = request->action == NBG_HWBP_CAPTURE_ARM_KDF_DUAL;
+    uint32_t expected_instruction = capture_dual
+        ? NBG_HWBP_CAPTURE_KDF_EOR
+        : (capture_kdf ? NBG_HWBP_CAPTURE_KDF_EOR
+                       : NBG_HWBP_CAPTURE_BR_X8);
 #else
     uint32_t expected_instruction = NBG_HWBP_CAPTURE_BR_X8;
 #endif
@@ -331,10 +492,20 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
          (request->match_enabled && request->match_register >= 31U) ||
          request->reserved_v2))
         return -EINVAL;
+#ifdef NBG_DEBUG
+    if (capture_dual &&
+        request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION_3)
+        return -EPROTO;
+    if (request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION_3 &&
+        (request->match_enabled > 1U ||
+         (request->match_enabled && request->match_register >= 31U) ||
+         request->reserved_v2 || request->reserved_v3))
+        return -EINVAL;
+#endif
     timeout = request->timeout_ms ? request->timeout_ms :
         HWBP_CAPTURE_DEFAULT_TIMEOUT_MS;
 #ifdef NBG_DEBUG
-    if (capture_kdf) {
+    if (capture_kdf || capture_dual) {
         if (timeout > HWBP_KDF_CAPTURE_MAX_TIMEOUT_MS)
             return -EINVAL;
     } else
@@ -349,6 +520,16 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
                                     &instruction, sizeof(instruction)) ||
         instruction != expected_instruction)
         return -EINVAL;
+#ifdef NBG_DEBUG
+    if (capture_dual &&
+        (secondary_target < 0x10000U || (secondary_target & 3U) ||
+         secondary_target == request->target_vaddr ||
+         !read_process_memory_kernel(tgid, secondary_target,
+                                     &secondary_instruction,
+                                     sizeof(secondary_instruction)) ||
+         secondary_instruction != NBG_HWBP_CAPTURE_KDF_PUBLISH))
+        return -EINVAL;
+#endif
 
     mutex_lock(&capture.lock);
     if (capture.active) {
@@ -370,9 +551,12 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     capture.tgid = tgid;
     capture.tid = request->tid;
     capture.target = request->target_vaddr;
-    capture.capture_pointees = request->abi_version == NBG_HWBP_CAPTURE_ABI_VERSION;
+    capture.capture_pointees =
+        request->abi_version >= NBG_HWBP_CAPTURE_ABI_VERSION;
 #ifdef NBG_DEBUG
-    capture.capture_kdf = capture_kdf;
+    capture.capture_kdf = capture_kdf || capture_dual;
+    capture.capture_dual = capture_dual;
+    capture.secondary_target = capture_dual ? secondary_target : 0;
 #endif
     if (capture.capture_pointees && request->match_enabled) {
         capture.match_enabled = 1;
@@ -385,7 +569,17 @@ static int hwbp_capture_arm(HwbpCaptureReq *request)
     raw.target_vaddr = request->target_vaddr;
     raw.callback = hwbp_capture_callback;
     raw.priv = &capture;
-    ret = raw_hwbp_add_exclusive(&raw);
+#ifdef NBG_DEBUG
+    if (capture_dual) {
+        struct raw_bp_req secondary = { 0 };
+        secondary.pid = tgid;
+        secondary.target_vaddr = secondary_target;
+        secondary.callback = hwbp_capture_callback;
+        secondary.priv = &capture;
+        ret = raw_hwbp_add_pair_exclusive(&raw, &secondary);
+    } else
+#endif
+        ret = raw_hwbp_add_exclusive(&raw);
     if (ret) {
         capture.result = ret;
         WRITE_ONCE(capture.active, false);
@@ -416,7 +610,13 @@ static int hwbp_capture_cancel(HwbpCaptureReq *request)
         target = capture.target;
         WRITE_ONCE(capture.active, false);
         atomic_set(&capture.state, NBG_HWBP_CAPTURE_CANCELED);
-        ret = raw_hwbp_del_pid(tgid, target);
+#ifdef NBG_DEBUG
+        if (capture.capture_dual)
+            ret = raw_hwbp_del_pair_pid(tgid, target,
+                                        capture.secondary_target);
+        else
+#endif
+            ret = raw_hwbp_del_pid(tgid, target);
         if (ret == -ENOENT)
             ret = 0;
         capture.result = ret;
@@ -433,7 +633,8 @@ int hwbp_capture_control(HwbpCaptureReq *request)
 
     if (!request ||
         (request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION_1 &&
-         request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION))
+         request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION &&
+         request->abi_version != NBG_HWBP_CAPTURE_ABI_VERSION_3))
         return -EPROTO;
     switch (request->action) {
     case NBG_HWBP_CAPTURE_ARM:
@@ -441,6 +642,7 @@ int hwbp_capture_control(HwbpCaptureReq *request)
         break;
 #ifdef NBG_DEBUG
     case NBG_HWBP_CAPTURE_ARM_KDF:
+    case NBG_HWBP_CAPTURE_ARM_KDF_DUAL:
         ret = hwbp_capture_arm(request);
         break;
 #endif
@@ -475,15 +677,27 @@ void hwbp_capture_exit(void)
 {
     pid_t tgid = 0;
     uint64_t target = 0;
+#ifdef NBG_DEBUG
+    uint64_t secondary_target = 0;
+#endif
 
     cancel_delayed_work_sync(&capture.timeout_work);
     mutex_lock(&capture.lock);
     if (capture.active) {
         tgid = capture.tgid;
         target = capture.target;
+#ifdef NBG_DEBUG
+        if (capture.capture_dual)
+            secondary_target = capture.secondary_target;
+#endif
         WRITE_ONCE(capture.active, false);
     }
     mutex_unlock(&capture.lock);
+#ifdef NBG_DEBUG
+    if (tgid && target && secondary_target)
+        raw_hwbp_del_pair_pid(tgid, target, secondary_target);
+    else
+#endif
     if (tgid && target)
         raw_hwbp_del_pid(tgid, target);
     flush_work(&capture.retire_work);

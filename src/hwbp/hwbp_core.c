@@ -484,6 +484,57 @@ int raw_hwbp_add_exclusive(struct raw_bp_req *req)
     return raw_hwbp_add_mode(req, false);
 }
 
+int raw_hwbp_add_pair_exclusive(struct raw_bp_req *first,
+                                struct raw_bp_req *second)
+{
+    int i, slots[2] = { -1, -1 }, free_count = 0;
+    unsigned long flags;
+
+    if (!first || !second || first->pid <= 0 ||
+        first->pid != second->pid || !first->target_vaddr ||
+        !second->target_vaddr || first->target_vaddr == second->target_vaddr ||
+        !first->callback || !second->callback)
+        return -EINVAL;
+
+    mutex_lock(&bp_lifecycle_mutex);
+    spin_lock_irqsave(&bp_table_lock, flags);
+    for (i = 0; i < bp_slot_count; i++) {
+        if (bp_table[i].active && bp_table[i].pid == first->pid &&
+            (bp_table[i].target_vaddr == first->target_vaddr ||
+             bp_table[i].target_vaddr == second->target_vaddr)) {
+            spin_unlock_irqrestore(&bp_table_lock, flags);
+            mutex_unlock(&bp_lifecycle_mutex);
+            return -EEXIST;
+        }
+        if (!bp_table[i].active && free_count < 2)
+            slots[free_count++] = i;
+    }
+    if (free_count != 2) {
+        spin_unlock_irqrestore(&bp_table_lock, flags);
+        mutex_unlock(&bp_lifecycle_mutex);
+        return -ENOSPC;
+    }
+
+    bp_table[slots[0]].pid = first->pid;
+    bp_table[slots[0]].target_vaddr = first->target_vaddr;
+    bp_table[slots[0]].callback = first->callback;
+    bp_table[slots[0]].priv = first->priv;
+    bp_table[slots[0]].retiring = false;
+    bp_table[slots[1]].pid = second->pid;
+    bp_table[slots[1]].target_vaddr = second->target_vaddr;
+    bp_table[slots[1]].callback = second->callback;
+    bp_table[slots[1]].priv = second->priv;
+    bp_table[slots[1]].retiring = false;
+    WRITE_ONCE(bp_table[slots[0]].active, true);
+    WRITE_ONCE(bp_table[slots[1]].active, true);
+    spin_unlock_irqrestore(&bp_table_lock, flags);
+
+    atomic_add(2, &bp_active_count);
+    nbg_on_each_cpu(bp_force_write_smp, NULL, 1);
+    mutex_unlock(&bp_lifecycle_mutex);
+    return 0;
+}
+
 
 int raw_hwbp_del_pid(pid_t pid, uint64_t target_vaddr)
 {
@@ -530,6 +581,46 @@ int raw_hwbp_del_pid(pid_t pid, uint64_t target_vaddr)
 
     mutex_unlock(&bp_lifecycle_mutex);
     return found > 0 ? 0 : -ENOENT;
+}
+
+int raw_hwbp_del_pair_pid(pid_t pid, uint64_t first_vaddr,
+                          uint64_t second_vaddr)
+{
+    int i, found = 0;
+    bool selected[MAX_RAW_BP] = { false };
+    unsigned long flags;
+
+    if (pid <= 0 || !first_vaddr || !second_vaddr ||
+        first_vaddr == second_vaddr)
+        return -EINVAL;
+
+    mutex_lock(&bp_lifecycle_mutex);
+    spin_lock_irqsave(&bp_table_lock, flags);
+    for (i = 0; i < bp_slot_count; i++) {
+        if (!bp_table[i].active || bp_table[i].pid != pid ||
+            bp_table[i].retiring ||
+            (bp_table[i].target_vaddr != first_vaddr &&
+             bp_table[i].target_vaddr != second_vaddr))
+            continue;
+        bp_table[i].retiring = true;
+        selected[i] = true;
+        found++;
+    }
+    spin_unlock_irqrestore(&bp_table_lock, flags);
+
+    if (found) {
+        atomic_sub(found, &bp_active_count);
+        nbg_on_each_cpu(bp_force_write_smp, NULL, 1);
+        synchronize_rcu();
+        spin_lock_irqsave(&bp_table_lock, flags);
+        for (i = 0; i < bp_slot_count; i++) {
+            if (selected[i])
+                memset(&bp_table[i], 0, sizeof(bp_table[i]));
+        }
+        spin_unlock_irqrestore(&bp_table_lock, flags);
+    }
+    mutex_unlock(&bp_lifecycle_mutex);
+    return found ? 0 : -ENOENT;
 }
 
 int raw_hwbp_del(uint64_t target_vaddr)
