@@ -539,6 +539,11 @@ typedef struct _HwbpCaps {
 #define NBG_HWBP_CAPTURE_CANCELED    5U
 #define NBG_HWBP_CAPTURE_BR_X8       0xD61F0100U
 #define NBG_HWBP_CAPTURE_FLAG_BRANCH_EMULATED (1U << 0)
+#ifdef NBG_DEBUG
+#define NBG_HWBP_CAPTURE_ARM_KDF      4U
+#define NBG_HWBP_CAPTURE_KDF_EOR      0xCA19012CU
+#define NBG_HWBP_CAPTURE_FLAG_KDF_EOR_EMULATED (1U << 1)
+#endif
 
 typedef struct _HwbpCaptureReq {
     uint32_t abi_version;

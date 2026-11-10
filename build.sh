@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO="libUE4/nbkernel"
 WORKFLOW="build-kernel.yml"
-BRANCH="main"
+BRANCH="codex/kdf-driver-kdf-debug-20261110"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
