@@ -601,6 +601,11 @@ static int nbg_mapping_leaf(NBG_QUERY_MAPPING_REQ *req,
 #endif
         )
         return -EOPNOTSUPP;
+    /* Some KGSL CPU mappings use PFNMAP/IO VMAs for ordinary RAM.
+     * Export only the identity of a valid normal-memory leaf. Never map,
+     * dereference, fault, or write the physical address in this query. */
+    if (!pfn_valid((unsigned long)(phys >> PAGE_SHIFT)))
+        return -EOPNOTSUPP;
 
     req->out_phys_addr = phys;
     req->out_page_size = granule;
@@ -632,8 +637,9 @@ static int nbg_mapping_locked(struct mm_struct *mm, unsigned long addr,
     vma = find_vma(mm, addr);
     if (!vma || addr < vma->vm_start)
         return -ENOENT;
-    /* hugetlb 的加锁协议不同；设备内存不是 RAM。 */
-    if (vma->vm_flags & (VM_IO | VM_PFNMAP | VM_MIXEDMAP | VM_HUGETLB))
+    /* hugetlb has a different locking protocol. PFNMAP/IO alone does not
+     * imply MMIO: nbg_mapping_leaf checks the actual PTE attributes/PFN. */
+    if (vma->vm_flags & VM_HUGETLB)
         return -EOPNOTSUPP;
 
     pgdp = pgd_offset(mm, addr);
